@@ -1,7 +1,6 @@
 #ifndef DEFINITIONS_HPP
 #define DEFINITIONS_HPP
 
-// --- compile-time constants ---
 constexpr unsigned long WEBSOCKET_BASE64 = 0x00000001;
 constexpr unsigned long WEBSOCKET_NOCRLF = 0x40000000;
 constexpr size_t PLAYER_STATUS_NORMAL = 0x00;
@@ -11,7 +10,6 @@ constexpr size_t PLAYER_STATUS_OPERATOR = 0x01;
 #undef min
 #endif
 
-// --- core enumerations ---
 enum SOCKET_OPERATION { OP_HANDSHAKE, OP_READ, OP_SOKT_RECYCLE };
 enum ClientState { STATE_HANDSHAKE, STATE_LOGIN, STATE_PLAY };
 enum BiomeID { BIOME_PLAINS = 1, BIOME_DESERT = 2, BIOME_RIVER = 7, BIOME_ICE_SPIKES = 140 };
@@ -25,7 +23,6 @@ enum ERROR_CODES {
 	ERROR_INTERNAL_NTDLL_FAILURE = -4
 };
 
-// --- engine structures ---
 struct GAME_ENTITY {
 	unsigned long long entityId;
 	EntityType type;
@@ -35,21 +32,25 @@ struct GAME_ENTITY {
 };
 
 struct CONNECTION_CONTEXT {
-	_OVERLAPPED         overlapped;
+	_OVERLAPPED overlapped;
 	unsigned long long socket;
 	uint8_t* buffer;
-	_WSABUF             wsaBuf;
-	SOCKET_OPERATION   operation;
+	size_t rxBufferOffset;
+	_WSABUF wsaBuf;
+	SOCKET_OPERATION operation;
 };
 
 struct PLAYER_SESSION {
 	ClientState state = STATE_HANDSHAKE;
-	int playerX = 0;
-	int playerY = 50;
-	int playerZ = 0;
+	double playerX = 8.0;
+	double playerY = 65.0;
+	double playerZ = 8.0;
+	float yaw = 0.0f;
+	float pitch = 0.0f;
 	char username[16] = { 0 };
 	size_t status = PLAYER_STATUS_NORMAL;
 	std::string gamemode = "SURVIVAL";
+	int entityId = 1;
 };
 
 struct ThreadArena {
@@ -71,24 +72,11 @@ struct ThreadArena {
 	void Clear() { offset = 0; }
 };
 
-// Explicit 16-byte packed structure matching your SIMD configuration
-struct alignas(16) FileCraftingMatrix {
-	uint16_t grid[9];
-	uint16_t pad[7];
-};
-
-struct FileRecipeDefinition {
-	FileCraftingMatrix inputPattern;
-	uint16_t resultID;
-	uint8_t resultCount;
-	uint8_t resultDamage;
-};
-
-// --- inline global context (C++17) ---
 inline std::atomic<bool> ENGINE = true;
 inline unsigned long long listenSock = INVALID_SOCKET;
 inline HANDLE hIOCP = NULL;
 inline std::unordered_map<unsigned long long, PLAYER_SESSION> ActiveSessions;
+inline CRITICAL_SECTION SessionLock;
 inline std::vector<GAME_ENTITY> GlobalEntities;
 inline thread_local ThreadArena WorkerArena;
 
@@ -108,7 +96,6 @@ struct Console {
 
 inline Console currentWindow;
 
-// --- intrinsics & system optimization pipelines ---
 __forceinline static bool CheckHardwareInstructionSupport() {
 	int cpuInfo[4] = { 0 };
 	__cpuid(cpuInfo, 1);
@@ -118,7 +105,6 @@ __forceinline static bool CheckHardwareInstructionSupport() {
 	return supportsRDRAND && supportsAVX2;
 }
 
-// OPTIMIZATION: 100% allocation-free stack-bound message serialization
 constexpr unsigned long long WriteVarIntToBuffer(char* dest, int value) {
 	size_t written = 0;
 	unsigned int uValue = static_cast<unsigned int>(value);
@@ -131,81 +117,83 @@ constexpr unsigned long long WriteVarIntToBuffer(char* dest, int value) {
 	return written;
 }
 
-static void BroadcastChatMessage(const std::string& sender, const std::string& message) {
-	// 1024 bytes is tight if a user sends a large message because Minecraft JSON has high overhead.
-	// Let's safe-guard with a 2048-byte 32-byte cache-aligned stack allocation.
-	alignas(32) char staticBuffer[2048];
+static int ReadVarInt(const uint8_t* buf, size_t maxLen, size_t& bytesRead) {
+	int value = 0;
+	int bitOffset = 0;
+	bytesRead = 0;
+	while (bytesRead < maxLen) {
+		uint8_t b = buf[bytesRead++];
+		value |= (b & 0x7F) << bitOffset;
+		if ((b & 0x80) == 0) return value;
+		bitOffset += 7;
+		if (bitOffset >= 35) break;
+	}
+	return 0;
+}
 
-	// Leave a safe offset buffer window at the beginning for arbitrary header lengths (32 bytes)
+static void SendWebSocketFrame(unsigned long long socket, const char* payload, size_t length) {
+	alignas(32) char headerBuffer[10];
+	size_t headerLen = 2;
+	headerBuffer[0] = static_cast<char>(0x82);
+	if (length <= 125) {
+		headerBuffer[1] = static_cast<char>(length);
+	}
+	else if (length <= 65535) {
+		headerBuffer[1] = 126;
+		headerBuffer[2] = static_cast<char>((length >> 8) & 0xFF);
+		headerBuffer[3] = static_cast<char>(length & 0xFF);
+		headerLen = 4;
+	}
+	else {
+		headerBuffer[1] = 127;
+		for (int i = 0; i < 8; ++i) {
+			headerBuffer[2 + i] = static_cast<char>((length >> ((7 - i) * 8)) & 0xFF);
+		}
+		headerLen = 10;
+	}
+
+	(void)send(socket, headerBuffer, static_cast<int>(headerLen), 0);
+	(void)send(socket, payload, static_cast<int>(length), 0);
+}
+
+static void BroadcastChatMessage(const std::string& sender, const std::string& message) {
+	alignas(32) char staticBuffer[2048];
 	char* jsonPayloadStart = staticBuffer + 32;
 	size_t maxJsonSize = sizeof(staticBuffer) - 32;
 
-	// Use format_to_n to completely prevent stack overflow attacks/bugs
 	std::format_to_n_result<char*> formatResult = std::format_to_n(jsonPayloadStart, maxJsonSize,
 		"{{\"text\":\"[{}] {}\"}}", sender, message);
 
 	size_t jsonLen = formatResult.size;
-	if (jsonLen >= maxJsonSize) [[unlikely]] { return; } // Dropped to prevent truncation errors
-	
+	if (jsonLen >= maxJsonSize) [[unlikely]] { return; }
 
-	// --- STEP 2: Prepend Minecraft Protocol Envelopes (Packet ID + Length VarInts) ---
-	constexpr char mcPacketId = 0x0F; // Chat Message packet ID
-
+	constexpr char mcPacketId = 0x0F;
 	char stringVarInt[5];
 	size_t stringVarIntLen = WriteVarIntToBuffer(stringVarInt, static_cast<int>(jsonLen));
 
-	// Size of [ID Byte] + [VarInt Length descriptor] + [Actual JSON Data string]
 	int mcInnerPayloadSize = static_cast<int>(1 + stringVarIntLen + jsonLen);
-
 	char mcTotalLengthVarInt[5];
 	size_t mcLengthVarIntLen = WriteVarIntToBuffer(mcTotalLengthVarInt, mcInnerPayloadSize);
 
 	size_t totalMcPacketSize = mcLengthVarIntLen + static_cast<size_t>(mcInnerPayloadSize);
-
-	// --- STEP 3: Handle WebSocket Framing Layers (Backwards-allocation mapping) ---
-	size_t wsHeaderSize = 2;
-	if (totalMcPacketSize > 125) {
-		wsHeaderSize = 4;
-	}
-
-	// Calculate exactly where the frame must start to hit the static JSON payload flawlessly
-	// JSON starts at 32. Subtract MC headers and WS headers to find the zero-copy origin point:
 	size_t mcHeaderStartOffset = 32 - (mcLengthVarIntLen + 1 + stringVarIntLen);
-	size_t finalFrameStartOffset = mcHeaderStartOffset - wsHeaderSize;
-
-	char* frameStart = staticBuffer + finalFrameStartOffset;
-
-	// Write out the WebSocket parameters safely
-	frameStart[0] = static_cast<char>(0x81); // FIN | Text Opcode
-	if (wsHeaderSize == 2) {
-		frameStart[1] = static_cast<char>(totalMcPacketSize);
-	}
-	else {
-		frameStart[1] = 126; // Extended 16-bit payload indicator
-		frameStart[2] = static_cast<char>((totalMcPacketSize >> 8) & 0xFF);
-		frameStart[3] = static_cast<char>(totalMcPacketSize & 0xFF);
-	}
-
-	// Write the calculated Minecraft VarInt strings and ID into place seamlessly
 	char* mcWriteCursor = staticBuffer + mcHeaderStartOffset;
+
 	std::copy_n(mcTotalLengthVarInt, mcLengthVarIntLen, mcWriteCursor);
 	mcWriteCursor += mcLengthVarIntLen;
-
 	*mcWriteCursor = mcPacketId;
 	mcWriteCursor += 1;
-
 	std::copy_n(stringVarInt, stringVarIntLen, mcWriteCursor);
 
-	// Total size of data to dispatch to the socket pipeline
-	size_t totalFrameSize = wsHeaderSize + totalMcPacketSize;
+	char* frameStart = staticBuffer + mcHeaderStartOffset;
 
-	// --- STEP 4: Concurrent Safe Multiplexed Send Loop ---
+	EnterCriticalSection(&SessionLock);
 	for (const auto& [socket, session] : ActiveSessions) {
 		if (session.state == STATE_PLAY) {
-			// Securely hands down your aligned stack pointer slice
-			(void)send(socket, frameStart, static_cast<int>(totalFrameSize), 0);
+			SendWebSocketFrame(socket, frameStart, totalMcPacketSize);
 		}
 	}
+	LeaveCriticalSection(&SessionLock);
 }
 
 __forceinline uint32_t GetHardwareRandom() {
@@ -216,59 +204,13 @@ __forceinline uint32_t GetHardwareRandom() {
 	return 13372026;
 }
 
-static void ExecuteServerCommand(unsigned long long clientSocket, const std::string& rawCommand) {
-	PLAYER_SESSION& session = ActiveSessions[clientSocket];
-
-	std::istringstream iss(rawCommand);
-	std::string baseCmd;
-	iss >> baseCmd;
-
-	bool requiresOp = (baseCmd == "/tp" || baseCmd == "/gamemode" || baseCmd == "/op" || baseCmd == "/deop" || baseCmd == "/ban");
-
-	if (requiresOp && !(session.status & PLAYER_STATUS_OPERATOR)) {
-		BroadcastChatMessage("Server", "You do not have permission to use this command.");
-		return;
-	}
-
-	if (baseCmd == "/tp") {
-		int targetX, targetY, targetZ;
-		if (iss >> targetX >> targetY >> targetZ) {
-			session.playerX = targetX;
-			session.playerY = targetY;
-			session.playerZ = targetZ;
-		}
-	}
-	else if (baseCmd == "/gamemode") {
-		std::string mode;
-		if (iss >> mode) {
-			if (mode.empty()) BroadcastChatMessage("Server", "You must specify a game mode");
-			if (mode == "SURVIVAL") session.gamemode = "SURVIVAL";
-			if (mode == "SPECTATOR") session.gamemode = "SPECTATOR";
-		}
-	}
-	else if (baseCmd == "/op") {
-		std::string targetUser;
-		if (iss >> targetUser) {
-			for (auto& [socket, pSession] : ActiveSessions) {
-				if (std::string(pSession.username) == targetUser) {
-					pSession.status |= PLAYER_STATUS_OPERATOR;
-					BroadcastChatMessage("Server", targetUser + " has been promoted to Operator.");
-					break;
-				}
-			}
-		}
-	}
-}
-
-
-
 static void LoadOrCreateServerProperties(unsigned short& port, std::wstring& mode) {
 	std::unordered_map<std::string, std::string> props;
 	std::ifstream file("server.properties");
 
 	if (!file.is_open()) {
 		std::ofstream outFile("server.properties");
-		outFile << "# Server Properties for EaglerCRAPPX Server\n";
+		outFile << "# Server Properties for Eaglercraft 1.12.2 Native Server\n";
 		outFile << "server-port=26565\n";
 		outFile << "gamemode=survival\n";
 		outFile << "view-distance=6\n";
@@ -294,7 +236,6 @@ static void LoadOrCreateServerProperties(unsigned short& port, std::wstring& mod
 
 class AVX2NoiseEngine {
 private:
-	// OPTIMIZATION: Converted table to 32-bit int to destroy the expensive vpgatherdd bottleneck
 	alignas(32) int32_t p_int[512];
 
 	void InitPermutation(uint32_t seed) {
@@ -355,7 +296,6 @@ public:
 		__m256d u = Fade_AVX2(x_frac);
 		__m256d v = Fade_AVX2(y_frac);
 
-		// OPTIMIZATION: Hardware scales aligned by 4 bytes now since types match up perfectly
 		__m256i p_X = _mm256_i32gather_epi32((const int*)p_int, X, 4);
 		__m256i p_Y = _mm256_i32gather_epi32((const int*)p_int, Y, 4);
 
@@ -365,7 +305,12 @@ public:
 		__m256d grad1 = Grad_AVX2(A, x_frac, y_frac);
 		__m256d grad2 = Grad_AVX2(B, _mm256_sub_pd(x_frac, _mm256_set1_pd(1.0)), y_frac);
 
-		__m256d res = Lerp_AVX2(v, Lerp_AVX2(u, grad1, grad2), Lerp_AVX2(u, grad1, grad2));
+		__m256i A_plus1 = _mm256_add_epi32(A, _mm256_set1_epi32(1));
+		__m256i B_plus1 = _mm256_add_epi32(B, _mm256_set1_epi32(1));
+		__m256d grad3 = Grad_AVX2(A_plus1, x_frac, _mm256_sub_pd(y_frac, _mm256_set1_pd(1.0)));
+		__m256d grad4 = Grad_AVX2(B_plus1, _mm256_sub_pd(x_frac, _mm256_set1_pd(1.0)), _mm256_sub_pd(y_frac, _mm256_set1_pd(1.0)));
+
+		__m256d res = Lerp_AVX2(v, Lerp_AVX2(u, grad1, grad2), Lerp_AVX2(u, grad3, grad4));
 		res = _mm256_mul_pd(_mm256_add_pd(res, _mm256_set1_pd(1.0)), _mm256_set1_pd(0.5));
 		_mm256_storeu_pd(outArray, res);
 	}
@@ -383,9 +328,7 @@ static void GenerateWorldChunk(int chunkX, int chunkZ, uint8_t* outChunkData) {
 	alignas(32) static thread_local double temp_res[4];
 	alignas(32) static thread_local double moisture_res[4];
 
-	// OPTIMIZATION: Pulled horizontal vector calculations outside, completely eliminating the stack-bouncing array construct loops
 	for (int x = 0; x < 16; x += 4) {
-		// Vector loaded constants directly into pipeline
 		__m256d base_x = _mm256_set_pd(
 			static_cast<double>((chunkX * 16) + x + 3),
 			static_cast<double>((chunkX * 16) + x + 2),
@@ -407,18 +350,13 @@ static void GenerateWorldChunk(int chunkX, int chunkZ, uint8_t* outChunkData) {
 				int currentX = x + subX;
 				double tVal = temp_res[subX];
 				double mVal = moisture_res[subX];
-				double rVal = terrain_res[subX];
 
 				BiomeID currentBiome = BIOME_PLAINS;
-				uint8_t surfaceBlock = 2;
-				uint8_t fillerBlock = 3;
+				uint8_t surfaceBlock = 2; // Grass
+				uint8_t fillerBlock = 3;  // Dirt
 				double heightScale = 1.0;
 
-				if (rVal > 0.44 && rVal < 0.48) {
-					currentBiome = BIOME_RIVER;
-					heightScale = 0.7;
-				}
-				else if (tVal < 0.25) {
+				if (tVal < 0.25) {
 					currentBiome = BIOME_ICE_SPIKES;
 					surfaceBlock = 79;
 					fillerBlock = 80;
@@ -438,13 +376,10 @@ static void GenerateWorldChunk(int chunkX, int chunkZ, uint8_t* outChunkData) {
 					size_t index = (y * 256) + (z * 16) + currentX;
 
 					if (y == 0) {
-						outChunkData[index] = 7;
-					}
-					else if (currentBiome == BIOME_RIVER && y >= calculatedHeight && y <= 62) {
-						outChunkData[index] = 9;
+						outChunkData[index] = 7; // Bedrock
 					}
 					else if (y < calculatedHeight - 4) {
-						outChunkData[index] = 1;
+						outChunkData[index] = 1; // Stone
 					}
 					else if (y < calculatedHeight) {
 						outChunkData[index] = fillerBlock;
@@ -463,14 +398,14 @@ static void GarbageCollectStrayEntities() {
 	unsigned long long currentTime = static_cast<unsigned long long>(GetTickCount64() / 1000);
 	size_t initialSize = GlobalEntities.size();
 
+	EnterCriticalSection(&SessionLock);
 	GlobalEntities.erase(std::remove_if(GlobalEntities.begin(), GlobalEntities.end(),
 		[currentTime](GAME_ENTITY& entity) {
 			bool playerNearby = false;
-
 			for (const auto& [socket, session] : ActiveSessions) {
 				if (session.state == STATE_PLAY) {
-					int dx = entity.posX - session.playerX;
-					int dz = entity.posZ - session.playerZ;
+					int dx = entity.posX - static_cast<int>(session.playerX);
+					int dz = entity.posZ - static_cast<int>(session.playerZ);
 					if (((dx * dx) + (dz * dz)) <= 16384) {
 						playerNearby = true;
 						entity.lastActiveTime = currentTime;
@@ -482,6 +417,7 @@ static void GarbageCollectStrayEntities() {
 		}),
 		GlobalEntities.end()
 	);
+	LeaveCriticalSection(&SessionLock);
 
 	size_t removedCount = initialSize - GlobalEntities.size();
 	if (removedCount > 0) {
@@ -490,50 +426,197 @@ static void GarbageCollectStrayEntities() {
 	}
 }
 
-static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, size_t len) {
-	if (len < 1) return;
-	PLAYER_SESSION& session = ActiveSessions[ctx->socket];
+static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
+	// Allocate buffers out of WorkerArena instead of the stack
+	char* packet = reinterpret_cast<char*>(WorkerArena.Allocate(16384));
+	char* framed = reinterpret_cast<char*>(WorkerArena.Allocate(16400));
+	size_t p = 0;
 
-	if (session.state == STATE_HANDSHAKE) {
-		if (payload[0] == 0x00) {
-			uint8_t serverMessageResponse[] = { 0x00, 0x0B, 'E', 'a', 'g', 'l', 'e', 'r', 'S', 'e', 'r', 'v', 'e', 'r' };
-			(void)send(ctx->socket, reinterpret_cast<char*>(serverMessageResponse), sizeof(serverMessageResponse), 0);
-			session.state = STATE_LOGIN;
+	packet[p++] = 0x20; // Chunk Data Packet ID
+
+	int32_t netX = _byteswap_ulong(chunkX);
+	int32_t netZ = _byteswap_ulong(chunkZ);
+	std::memcpy(&packet[p], &netX, 4); p += 4;
+	std::memcpy(&packet[p], &netZ, 4); p += 4;
+
+	packet[p++] = 0x01; // Full chunk flag
+
+	p += WriteVarIntToBuffer(&packet[p], 0x01); // Primary Bitmask
+
+	uint8_t* blockData = reinterpret_cast<uint8_t*>(WorkerArena.Allocate(65536));
+	GenerateWorldChunk(chunkX, chunkZ, blockData);
+
+	// Calculate section size (Paletted layout)
+	size_t dataLen = 1 + 1 + 2 + (4096 * 13 / 64) * 8 + 2048 + 2048;
+	p += WriteVarIntToBuffer(&packet[p], static_cast<int>(dataLen));
+
+	packet[p++] = 13; // Bits per block palette
+	p += WriteVarIntToBuffer(&packet[p], 0); // Palette Length 0 (Direct ID mapping)
+
+	// 13-bit Direct-Packed Long Array Data Structure
+	size_t longCount = (4096 * 13) / 64;
+	p += WriteVarIntToBuffer(&packet[p], static_cast<int>(longCount));
+
+	uint64_t currentLong = 0;
+	int bitOffset = 0;
+
+	for (int y = 0; y < 16; ++y) {
+		for (int z = 0; z < 16; ++z) {
+			for (int x = 0; x < 16; ++x) {
+				size_t flatIdx = (y * 256) + (z * 16) + x;
+				uint64_t val = static_cast<uint64_t>(blockData[flatIdx]) << 4;
+
+				currentLong |= (val << bitOffset);
+				bitOffset += 13;
+
+				if (bitOffset >= 64) {
+					uint64_t netLong = _byteswap_uint64(currentLong);
+					std::memcpy(&packet[p], &netLong, 8); p += 8;
+					bitOffset -= 64;
+					currentLong = (bitOffset > 0) ? (val >> (13 - bitOffset)) : 0;
+				}
+			}
 		}
 	}
+	if (bitOffset > 0) {
+		uint64_t netLong = _byteswap_uint64(currentLong);
+		std::memcpy(&packet[p], &netLong, 8); p += 8;
+	}
+
+	std::memset(&packet[p], 0xFF, 2048); p += 2048; // Block light
+	std::memset(&packet[p], 0xFF, 2048); p += 2048; // Sky light
+	std::memset(&packet[p], 1, 256); p += 256;      // Biomes
+
+	p += WriteVarIntToBuffer(&packet[p], 0); // 0 NBT Block Entities
+
+	// Framing
+	char vLen[5];
+	size_t vLenSize = WriteVarIntToBuffer(vLen, static_cast<int>(p));
+
+	std::copy_n(vLen, vLenSize, framed);
+	std::copy_n(packet, p, framed + vLenSize);
+
+	SendWebSocketFrame(socket, framed, vLenSize + p);
+
+	// Reset arena offset at the very end of processing
+	WorkerArena.Clear();
+}
+static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, size_t len) {
+	if (len < 1) return;
+
+	EnterCriticalSection(&SessionLock);
+	PLAYER_SESSION& session = ActiveSessions[ctx->socket];
+	LeaveCriticalSection(&SessionLock);
+
+	size_t cursor = 0;
+	size_t packetLenRead = 0;
+	int packetLength = ReadVarInt(payload, len, packetLenRead);
+	cursor += packetLenRead;
+
+	if (cursor >= len) return;
+
+	size_t idLenRead = 0;
+	int packetId = ReadVarInt(payload + cursor, len - cursor, idLenRead);
+	cursor += idLenRead;
+
+	if (session.state == STATE_HANDSHAKE) {
+		if (packetId == 0x00) { session.state = STATE_LOGIN; }
+	}
 	else if (session.state == STATE_LOGIN) {
-		if (payload[0] == 0x01) {
-			uint8_t loginSuccess[] = { 0x02, 0x00 };
-			(void)send(ctx->socket, reinterpret_cast<char*>(loginSuccess), sizeof(loginSuccess), 0);
+		if (packetId == 0x00) { // Login Start
+			size_t strLenRead = 0;
+			int strLen = ReadVarInt(payload + cursor, len - cursor, strLenRead);
+			cursor += strLenRead;
+
+			if (strLen > 0 && strLen <= 16 && cursor + strLen <= len) {
+				std::memcpy(session.username, payload + cursor, strLen);
+				session.username[strLen] = '\0';
+			}
+
+			// Respond with Login Success (0x02)
+			alignas(32) char resp[128];
+			size_t rp = 0;
+			resp[rp++] = 0x02;
+
+			std::string uuidStr = "c06180a0-6f91-424a-9e19-33152ef61d16";
+			rp += WriteVarIntToBuffer(&resp[rp], static_cast<int>(uuidStr.length()));
+			std::copy_n(uuidStr.c_str(), uuidStr.length(), &resp[rp]);
+			rp += uuidStr.length();
+
+			std::string userStr(session.username);
+			rp += WriteVarIntToBuffer(&resp[rp], static_cast<int>(userStr.length()));
+			std::copy_n(userStr.c_str(), userStr.length(), &resp[rp]);
+			rp += userStr.length();
+
+			char vLen[5];
+			size_t vLenSize = WriteVarIntToBuffer(vLen, static_cast<int>(rp));
+			alignas(32) char framed[256];
+			std::copy_n(vLen, vLenSize, framed);
+			std::copy_n(resp, rp, framed + vLenSize);
+
+			SendWebSocketFrame(ctx->socket, framed, vLenSize + rp);
 			session.state = STATE_PLAY;
+
+			// Dispatch Play Join Game (0x23)
+			alignas(32) char joinPacket[128];
+			size_t jp = 0;
+			joinPacket[jp++] = 0x23;
+			int32_t eId = _byteswap_ulong(session.entityId);
+			std::memcpy(&joinPacket[jp], &eId, 4); jp += 4;
+			joinPacket[jp++] = 1;
+			int32_t dim = 0;
+			std::memcpy(&joinPacket[jp], &dim, 4); jp += 4;
+			joinPacket[jp++] = 0;
+			joinPacket[jp++] = 10;
+			std::string levelType = "default";
+			jp += WriteVarIntToBuffer(&joinPacket[jp], static_cast<int>(levelType.length()));
+			std::copy_n(levelType.c_str(), levelType.length(), &joinPacket[jp]); jp += levelType.length();
+			joinPacket[jp++] = 0;
+
+			size_t jvSize = WriteVarIntToBuffer(vLen, static_cast<int>(jp));
+			std::copy_n(vLen, jvSize, framed);
+			std::copy_n(joinPacket, jp, framed + jvSize);
+			SendWebSocketFrame(ctx->socket, framed, jvSize + jp);
+
+			// Dispatch Position and Look (0x2F)
+			alignas(32) char posPacket[128];
+			size_t pp = 0;
+			posPacket[pp++] = 0x2F;
+			double px = 8.0, py = 65.0, pz = 8.0;
+			uint64_t nx, ny, nz;
+			std::memcpy(&nx, &px, 8); nx = _byteswap_uint64(nx); std::memcpy(&posPacket[pp], &nx, 8); pp += 8;
+			std::memcpy(&ny, &py, 8); ny = _byteswap_uint64(ny); std::memcpy(&posPacket[pp], &ny, 8); pp += 8;
+			std::memcpy(&nz, &pz, 8); nz = _byteswap_uint64(nz); std::memcpy(&posPacket[pp], &nz, 8); pp += 8;
+			float yaw = 0.0f, pitch = 0.0f;
+			uint32_t nyaw, npitch;
+			std::memcpy(&nyaw, &yaw, 4); nyaw = _byteswap_ulong(nyaw); std::memcpy(&posPacket[pp], &nyaw, 4); pp += 4;
+			std::memcpy(&npitch, &pitch, 4); npitch = _byteswap_ulong(npitch); std::memcpy(&posPacket[pp], &npitch, 4); pp += 4;
+			posPacket[pp++] = 0x00;
+			pp += WriteVarIntToBuffer(&posPacket[pp], 1);
+
+			size_t pvSize = WriteVarIntToBuffer(vLen, static_cast<int>(pp));
+			std::copy_n(vLen, pvSize, framed);
+			std::copy_n(posPacket, pp, framed + pvSize);
+			SendWebSocketFrame(ctx->socket, framed, pvSize + pp);
+
+			// Render radius 2 chunks
+			for (int cx = -2; cx <= 2; ++cx) {
+				for (int cz = -2; cz <= 2; ++cz) {
+					SendChunkColumn(ctx->socket, cx, cz);
+				}
+			}
 		}
 	}
 	else if (session.state == STATE_PLAY) {
-		if (payload[0] == 0x03) {
-			std::memcpy(&session.playerX, &payload[1], 4);
-			std::memcpy(&session.playerZ, &payload[5], 4);
-
-			int currentChunkX = session.playerX >> 4;
-			int currentChunkZ = session.playerZ >> 4;
-
-			// OPTIMIZATION: Stripped placement new pointer wrappers. Direct memory handling.
-			uint8_t* chunkBuffer = reinterpret_cast<uint8_t*>(WorkerArena.Allocate(65536));
-			if (!chunkBuffer) [[unlikely]] return;
-
-			GenerateWorldChunk(currentChunkX, currentChunkZ, chunkBuffer);
-			(void)send(ctx->socket, reinterpret_cast<char*>(chunkBuffer), 512, 0);
-
-			WorkerArena.Clear();
+		if (packetId == 0x0D || packetId == 0x0E) {
+			if (cursor + 24 <= len) {
+				uint64_t rawX, rawY, rawZ;
+				std::memcpy(&rawX, payload + cursor, 8); rawX = _byteswap_uint64(rawX); std::memcpy(&session.playerX, &rawX, 8);
+				std::memcpy(&rawY, payload + cursor + 8, 8); rawY = _byteswap_uint64(rawY); std::memcpy(&session.playerY, &rawY, 8);
+				std::memcpy(&rawZ, payload + cursor + 16, 8); rawZ = _byteswap_uint64(rawZ); std::memcpy(&session.playerZ, &rawZ, 8);
+			}
 		}
 	}
-}
-
-static void pin_to_core(unsigned long long core) {
-	void* currentThread = GetCurrentThread();
-	SetThreadAffinityMask(currentThread, core);
-	(void)SetThreadIdealProcessor(currentThread, static_cast<unsigned long>(core));
-	SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-	SetThreadPriorityBoost(currentThread, 1);
 }
 
 static int __stdcall ConsoleCtrlHandler(unsigned long dwCtrlType) {
