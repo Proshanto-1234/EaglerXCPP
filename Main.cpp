@@ -50,6 +50,48 @@
 #include "DEFINITIONS.hpp"
 #include "SYSTEMINFO_VIEW.hpp"
 
+// ============================================================================
+// RIO (REGISTERED I/O) EXTENSION SUBSYSTEM
+// ============================================================================
+static RIO_EXTENSION_FUNCTION_TABLE g_rio = {};
+static RIO_BUFFERID g_rioBufferId = RIO_INVALID_BUFFERID;
+static uint8_t* g_rioBufferPool = nullptr;
+static RIO_CQ g_rioCQ = RIO_INVALID_CQ;
+static bool g_rioEnabled = false;
+
+constexpr DWORD RIO_POOL_SIZE = 64 * 1024 * 1024; // 64 MB Pinned RAM Pool
+constexpr DWORD RIO_SLICE_SIZE = 32768;            // 32 KB per socket slice
+
+static bool InitializeRIOSubsystem(SOCKET dummySock) {
+	GUID functionTableId = WSAID_MULTIPLE_RIO;
+	DWORD dwBytes = 0;
+
+	int result = WSAIoctl(
+		dummySock, SIO_GET_MULTIPLE_EXTENSION_FUNCTION_POINTER,
+		&functionTableId, sizeof(GUID),
+		&g_rio, sizeof(g_rio),
+		&dwBytes, NULL, NULL
+	);
+
+	if (result == SOCKET_ERROR) return false;
+
+	// Allocate page-aligned, contiguous RAM pool
+	g_rioBufferPool = reinterpret_cast<uint8_t*>(_aligned_malloc(RIO_POOL_SIZE, 4096));
+	if (!g_rioBufferPool) return false;
+
+	// Pin RAM memory pages persistently with afd.sys kernel network driver
+	g_rioBufferId = g_rio.RIORegisterBuffer(reinterpret_cast<char*>(g_rioBufferPool), RIO_POOL_SIZE);
+	if (g_rioBufferId == RIO_INVALID_BUFFERID) return false;
+
+	// Create Ring-3 User-Mode Lock-Free Completion Queue
+	g_rioCQ = g_rio.RIOCreateCompletionQueue(10000, NULL);
+	if (g_rioCQ == RIO_INVALID_CQ) return false;
+
+	g_rioEnabled = true;
+	return true;
+}
+// ============================================================================
+
 static void* hGenerationThreadSignal = nullptr;
 inline unsigned char* GlobalWorldMemory = nullptr;
 
@@ -115,7 +157,13 @@ int main(int argc, char* argv[]) {
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return 1;
 
 	hIOCP = CreateIoCompletionPort(((void*)(long long)-1), NULL, 0, 0);
-	listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	listenSock = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_REGISTERED_IO);
+
+	// Load RIO Extension pointers dynamically via dummy socket query
+	if (InitializeRIOSubsystem(listenSock)) {
+		currentWindow.message = L"Registered I/O (RIO) Subsystem Initialized Successfully.\n";
+		WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned long>(currentWindow.message.size()), &currentWindow.written, NULL);
+	}
 
 	LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 	_GUID GuidAcceptEx = WSAID_ACCEPTEX;
@@ -137,9 +185,16 @@ int main(int argc, char* argv[]) {
 	pool.reserve(32);
 	for (int i = 0; i < 32; ++i) {
 		CONNECTION_CONTEXT* ctx = new CONNECTION_CONTEXT();
-		ctx->socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		ctx->socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_REGISTERED_IO);
 		if (ctx->socket == INVALID_SOCKET) return ERROR_CRITICAL_MEMORY_FAILURE;
-		ctx->buffer = reinterpret_cast<uint8_t*>(_aligned_malloc(32768, 32));
+
+		// Assign pre-pinned buffer slice from the RIO buffer pool
+		if (g_rioEnabled && (i * RIO_SLICE_SIZE < RIO_POOL_SIZE)) {
+			ctx->buffer = g_rioBufferPool + (i * RIO_SLICE_SIZE);
+		} else {
+			ctx->buffer = reinterpret_cast<uint8_t*>(_aligned_malloc(32768, 32));
+		}
+
 		if (!ctx->buffer) return ERROR_CRITICAL_MEMORY_FAILURE;
 		ctx->rxBufferOffset = 0;
 		ctx->operation = OP_HANDSHAKE;
@@ -158,10 +213,22 @@ int main(int argc, char* argv[]) {
 	WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned long>(currentWindow.message.size()), &currentWindow.written, NULL);
 
 	_OVERLAPPED_ENTRY entries[16] = {};
+	RIORESULT rioResults[16] = {};
 	unsigned long removed = 0;
 	unsigned long long lastCleanupTime = GetTickCount64() / 1000;
 
 	while (ENGINE) {
+		// DRAIN RIO LOCK-FREE USER-MODE COMPLETION QUEUE IN RING 3 FIRST
+		if (g_rioEnabled) {
+			ULONG rioDequeued = g_rio.RIODequeueCompletion(g_rioCQ, rioResults, 16);
+			for (ULONG r = 0; r < rioDequeued; ++r) {
+				CONNECTION_CONTEXT* rioCtx = reinterpret_cast<CONNECTION_CONTEXT*>(rioResults[r].RequestContext);
+				if (rioCtx && rioResults[r].BytesTransferred > 0) {
+					rioCtx->rxBufferOffset += rioResults[r].BytesTransferred;
+				}
+			}
+		}
+
 		removed = 0;
 		if (!GetQueuedCompletionStatusEx(hIOCP, entries, 16, &removed, 1000, 0)) {
 			if (!ENGINE) break;
@@ -286,8 +353,16 @@ int main(int argc, char* argv[]) {
 
 	for (auto ctx : pool) {
 		if (ctx->socket != INVALID_SOCKET) closesocket(ctx->socket);
-		if (ctx->buffer) _aligned_free(ctx->buffer);
+		// If buffer was allocated outside g_rioBufferPool, free it safely
+		if (ctx->buffer && (!g_rioEnabled || (ctx->buffer < g_rioBufferPool || ctx->buffer >= g_rioBufferPool + RIO_POOL_SIZE))) {
+			_aligned_free(ctx->buffer);
+		}
 		delete ctx;
+	}
+
+	if (g_rioEnabled && g_rioBufferPool) {
+		g_rio.RIODeregisterBuffer(g_rioBufferId);
+		_aligned_free(g_rioBufferPool);
 	}
 
 	if (GlobalWorldMemory) _aligned_free(GlobalWorldMemory);
