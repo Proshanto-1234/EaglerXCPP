@@ -1,10 +1,38 @@
 #ifndef DEFINITIONS_HPP
 #define DEFINITIONS_HPP
 
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <mswsock.h> // Required for RIO types and definitions
+
+#include <cstdint>
+#include <atomic>
+#include <unordered_map>
+#include <vector>
+#include <string>
+#include <string_view>
+#include <format>
+#include <numeric>
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <immintrin.h>
+
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "mswsock.lib")
+
 constexpr unsigned long WEBSOCKET_BASE64 = 0x00000001;
 constexpr unsigned long WEBSOCKET_NOCRLF = 0x40000000;
 constexpr size_t PLAYER_STATUS_NORMAL = 0x00;
 constexpr size_t PLAYER_STATUS_OPERATOR = 0x01;
+
+// Registered I/O Memory Allocations
+constexpr DWORD RIO_POOL_SIZE  = 64 * 1024 * 1024; // 64 MB Pinned RAM Pool
+constexpr DWORD RIO_SLICE_SIZE = 32768;            // 32 KB per socket slice
 
 #if defined(min)
 #undef min
@@ -31,6 +59,9 @@ struct GAME_ENTITY {
 	unsigned long long lastActiveTime;
 };
 
+// ============================================================================
+// UPDATED FOR REGISTERED I/O (RIO) SUPPORT
+// ============================================================================
 struct CONNECTION_CONTEXT {
 	_OVERLAPPED overlapped;
 	unsigned long long socket;
@@ -38,6 +69,25 @@ struct CONNECTION_CONTEXT {
 	size_t rxBufferOffset;
 	_WSABUF wsaBuf;
 	SOCKET_OPERATION operation;
+
+	// Native RIO Queue and Buffer primitives
+	RIO_RQ requestQueue;
+	RIO_BUF rioBuf;
+	DWORD bufferSliceIndex;
+
+	CONNECTION_CONTEXT()
+		: socket(INVALID_SOCKET),
+		  buffer(nullptr),
+		  rxBufferOffset(0),
+		  operation(OP_HANDSHAKE),
+		  requestQueue(RIO_INVALID_RQ),
+		  bufferSliceIndex(0)
+	{
+		std::memset(&overlapped, 0, sizeof(_OVERLAPPED));
+		std::memset(&rioBuf, 0, sizeof(RIO_BUF));
+		wsaBuf.buf = nullptr;
+		wsaBuf.len = 0;
+	}
 };
 
 struct PLAYER_SESSION {
@@ -501,6 +551,7 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 	// Reset arena offset at the very end of processing
 	WorkerArena.Clear();
 }
+
 static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, size_t len) {
 	if (len < 1) return;
 
@@ -616,7 +667,7 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 				std::memcpy(&rawZ, payload + cursor + 16, 8); rawZ = _byteswap_uint64(rawZ); std::memcpy(&session.playerZ, &rawZ, 8);
 			}
 		}
-	}
+	} 
 }
 
 static int __stdcall ConsoleCtrlHandler(unsigned long dwCtrlType) {
