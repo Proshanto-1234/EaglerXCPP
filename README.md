@@ -1,5 +1,5 @@
-# Eaglercraft 1.12.2 Update 3 server based on C++ to achieve surprisingly low latency
-A low-latency Minecraft 1.12.2 (Protocol Eaglercraft, WebSocket Connection) server backend written in native C++ for x64-86 bit Windows systems
+# Eaglercraft 1.12.2 Update 3 server based on C++
+A low-latency Minecraft 1.12.2 (Protocol Eaglercraft, WebSocket Connection) server backend written in native C++ for x64-86 bit Windows systems. This server uses unusual surprisingly fast optimizations to reduce latency and uses smarter preferences than usual Java server programs
 
 ## Key Architectural Preferences
 * **Registered Input/Output and Network Acceleration**: Direct zero-copy network buffers using Windows RIO and IOCP rings for sub-millisecond packet processing.
