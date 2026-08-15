@@ -57,7 +57,7 @@ static RIO_EXTENSION_FUNCTION_TABLE g_rio = {};
 static RIO_BUFFERID g_rioBufferId = RIO_INVALID_BUFFERID;
 static uint8_t* g_rioBufferPool = nullptr;
 static RIO_CQ g_rioCQ = RIO_INVALID_CQ;
-static HANDLE g_rioEvent = WSA_INVALID_EVENT;
+static void* g_rioEvent = WSA_INVALID_EVENT;
 static bool g_rioEnabled = false;
 
 constexpr DWORD RIO_POOL_SIZE = 64 * 1024 * 1024; // 64 MB Pinned RAM Pool
@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
 	GlobalWorldMemory = reinterpret_cast<unsigned char*>(_aligned_malloc(64 * 64 * 65536, 32));
 	hGenerationThreadSignal = CreateEvent(NULL, TRUE, FALSE, NULL);
 	uint32_t threadId = 0;
-	HANDLE hGenThread = reinterpret_cast<HANDLE>(_beginthreadex(NULL, 0, (_beginthreadex_proc_type)WorldGenerationWorkerThread, NULL, 0, &threadId));
+	void* hGenThread = reinterpret_cast<void*>(_beginthreadex(NULL, 0, (_beginthreadex_proc_type)WorldGenerationWorkerThread, NULL, 0, &threadId));
 	if (hGenThread) CloseHandle(hGenThread);
 
 	std::pair<unsigned long, unsigned long> corePairs = DynamicGetLeastUsedCores();
