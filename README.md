@@ -13,5 +13,14 @@ A low-latency Minecraft 1.12.2 (Protocol Eaglercraft, WebSocket Connection) serv
 * **Runtime Target**: Windows 10 and forwards, x64-bit
 * **Language standard**: C++ 20 language.
 * ** MSVC Version**: MSVC v143 or Visual Studio 2026 and forwards.
+
+## How to build the project
+There is already a VCXPROJ file in this repository which one can download alongside the main program files. In order to build this project in Visual studio, follow the steps below:
+* **Open the downloaded VCXPROJ file by right-clicking
+* **Set configuration to Release at the top ribbon (if not already set)**
+* **Ensure the project files are in the same directory and Enhanced Instruction Set is configured to AVX2**
+* **Press `F5` and wait
+* ** Locate the project executable in the 'bin' directory
 ## Note ##
+The addition library dependencies have already been configured by in-source `#pragma` directives native to Microsoft Visual C/C++ (MSVC) compiler. Therefore, there is no need to set them again in the project configuration
 Additional Library dependencies have already been configured with `#pragma` preprocessing directives, one can skip setting the Project Configuration file for the same settings
