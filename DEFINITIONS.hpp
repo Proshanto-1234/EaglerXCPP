@@ -543,4 +543,3 @@ void GarbageCollectStrayEntities() {
     LeaveCriticalSection(&SessionLock);
 }
 #endif // DEIFINITIONS.hpp
-#endif // !DEFINITIONS_HPP
