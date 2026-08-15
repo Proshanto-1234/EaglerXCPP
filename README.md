@@ -9,9 +9,9 @@ A low-latency Minecraft 1.12.2 (Protocol Eaglercraft, WebSocket Connection) serv
 ## Build targets and requirements AND Project Settings
 * **Platform**: Windows
 * **Compiler type**: MSVC latest 64-bit
-* **Build Options**: Multi-Threaded ('/MT'), Console Subsystem, Release configuration binary. Optimization level will be 'Favour Speed'.
+* **Build Options**: Multi-Threaded (`/MT`), Console Subsystem, Release configuration binary. Optimization level will be 'Favour Speed'.
 * **Runtime Target**: Windows 10 and forwards, x64-bit
 * **Language standard**: C++ 20 language.
 * ** MSVC Version**: MSVC v143 or Visual Studio 2026 and forwards.
 ## Note ##
-Additional Library dependencies have already been configured with '#pragma' preprocessing directives, one can skip setting the Project Configuration file for the same settings
+Additional Library dependencies have already been configured with `#pragma` preprocessing directives, one can skip setting the Project Configuration file for the same settings
