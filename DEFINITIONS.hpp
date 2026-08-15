@@ -1,545 +1,686 @@
 #ifndef DEFINITIONS_HPP
 #define DEFINITIONS_HPP
 
-#ifndef NOMINMAX
 #define NOMINMAX
-#endif
+#define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <mswsock.h>
+#include <mswsock.h> // Required for RIO types and definitions
 
-#include <immintrin.h>
-#include <stdint.h>
-#include <cmath>
-#include <vector>
-#include <unordered_map>
-#include <string>
-#include <cstring>
+#include <cstdint>
 #include <atomic>
+#include <unordered_map>
+#include <vector>
+#include <string>
+#include <string_view>
+#include <format>
+#include <numeric>
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <immintrin.h>
 
-#define OP_HANDSHAKE 1
-#define OP_READ 2
-#define OP_SOKT_RECYCLE 3
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "mswsock.lib")
 
-#define WEBSOCKET_NOCRLF 0x40000000
-#define WEBSOCKET_BASE64 0x00000001
+constexpr unsigned long WEBSOCKET_BASE64 = 0x00000001;
+constexpr unsigned long WEBSOCKET_NOCRLF = 0x40000000;
+constexpr size_t PLAYER_STATUS_NORMAL = 0x00;
+constexpr size_t PLAYER_STATUS_OPERATOR = 0x01;
 
-#define ERROR_UNSUPPORTED_HARDWARE 0xE0000001
-#define ERROR_INTERNAL_NTDLL_FAILURE 0xE0000002
-#define ERROR_CRITICAL_MEMORY_FAILURE 0xE0000003
+// Registered I/O Memory Allocations
+constexpr DWORD RIO_POOL_SIZE  = 64 * 1024 * 1024; // 64 MB Pinned RAM Pool
+constexpr DWORD RIO_SLICE_SIZE = 32768;            // 32 KB per socket slice
 
-// Block Identifiers (Minecraft 1.12.2 IDs)
-constexpr uint8_t BLOCK_AIR = 0;
-constexpr uint8_t BLOCK_STONE = 1;
-constexpr uint8_t BLOCK_GRASS = 2;
-constexpr uint8_t BLOCK_DIRT = 3;
-constexpr uint8_t BLOCK_BEDROCK = 7;
-constexpr uint8_t BLOCK_WATER = 9;
-constexpr uint8_t BLOCK_SAND = 12;
-constexpr uint8_t BLOCK_ICE = 79;
+#if defined(min)
+#undef min
+#endif
 
-// Biome Identifiers
-constexpr uint8_t BIOME_PLAINS = 1;
-constexpr uint8_t BIOME_DESERT = 2;
-constexpr uint8_t BIOME_ICE_SPIKES = 140;
+enum SOCKET_OPERATION { OP_HANDSHAKE, OP_READ, OP_SOKT_RECYCLE };
+enum ClientState { STATE_HANDSHAKE, STATE_LOGIN, STATE_PLAY };
+enum BiomeID { BIOME_PLAINS = 1, BIOME_DESERT = 2, BIOME_RIVER = 7, BIOME_ICE_SPIKES = 140 };
+enum EntityType { ENTITY_MOB, ENTITY_PROJECTILE };
+enum PLAYER_GAMEMODE { SURVIVAL, SPECTATOR };
 
-struct WindowContext {
-    HANDLE hOut = NULL;
-    HANDLE hErr = NULL;
-    std::wstring message;
-    DWORD written = 0;
-
-    bool Initialize() {
-        hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-        hErr = GetStdHandle(STD_ERROR_HANDLE);
-        return (hOut != INVALID_HANDLE_VALUE && hErr != INVALID_HANDLE_VALUE);
-    }
+enum ERROR_CODES {
+	ERROR_INTERNAL = -1,
+	ERROR_UNSUPPORTED_HARDWARE = -2,
+	ERROR_CRITICAL_MEMORY_FAILURE = -3,
+	ERROR_INTERNAL_NTDLL_FAILURE = -4
 };
 
-WindowContext currentWindow;
-HANDLE hIOCP = NULL;
-SOCKET listenSock = INVALID_SOCKET;
-CRITICAL_SECTION SessionLock;
-std::atomic<bool> ENGINE{ true };
-
-// Dynamic Player Session Entity State
-struct PLAYER_SESSION {
-    int32_t entityId = 1;
-    double x = 0.0;
-    double y = 80.0;
-    double z = 0.0;
-    float yaw = 0.0f;
-    float pitch = 0.0f;
-    bool onGround = true;
-    uint8_t gameMode = 1; // 1 = Creative, 0 = Survival
-    int dimension = 0;    // 0 = Overworld
-    uint8_t selectedSlot = 0;
-    uint8_t heldItemBlock = BLOCK_STONE;
+struct GAME_ENTITY {
+	unsigned long long entityId;
+	EntityType type;
+	int posX;
+	int posZ;
+	unsigned long long lastActiveTime;
 };
 
-std::unordered_map<SOCKET, PLAYER_SESSION> ActiveSessions;
-
-// Consolidated Unified Connection Context for RIO & IOCP Compatibility
+// ============================================================================
+// UPDATED FOR REGISTERED I/O (RIO) SUPPORT
+// ============================================================================
 struct CONNECTION_CONTEXT {
-    OVERLAPPED overlapped;
-    SOCKET socket;
-    uint8_t* buffer;
-    size_t rxBufferOffset;
-    DWORD operation;
-    WSABUF wsaBuf;
-    RIO_RQ requestQueue;
-    RIO_BUF rioBuf;
-    DWORD bufferSliceIndex;
+	_OVERLAPPED overlapped;
+	unsigned long long socket;
+	uint8_t* buffer;
+	size_t rxBufferOffset;
+	_WSABUF wsaBuf;
+	SOCKET_OPERATION operation;
+
+	// Native RIO Queue and Buffer primitives
+	RIO_RQ requestQueue;
+	RIO_BUF rioBuf;
+	DWORD bufferSliceIndex;
+
+	CONNECTION_CONTEXT()
+		: socket(INVALID_SOCKET),
+		  buffer(nullptr),
+		  rxBufferOffset(0),
+		  operation(OP_HANDSHAKE),
+		  requestQueue(RIO_INVALID_RQ),
+		  bufferSliceIndex(0)
+	{
+		std::memset(&overlapped, 0, sizeof(_OVERLAPPED));
+		std::memset(&rioBuf, 0, sizeof(RIO_BUF));
+		wsaBuf.buf = nullptr;
+		wsaBuf.len = 0;
+	}
 };
 
-// Zero-Allocation Thread Arena Allocator (128 KB Ring Buffer)
+struct PLAYER_SESSION {
+	ClientState state = STATE_HANDSHAKE;
+	double playerX = 8.0;
+	double playerY = 65.0;
+	double playerZ = 8.0;
+	float yaw = 0.0f;
+	float pitch = 0.0f;
+	char username[16] = { 0 };
+	size_t status = PLAYER_STATUS_NORMAL;
+	std::string gamemode = "SURVIVAL";
+	int entityId = 1;
+};
+
 struct ThreadArena {
-    alignas(32) uint8_t pool[131072];
-    size_t offset = 0;
+	alignas(32) uint8_t memoryPool[128 * 1024];
+	size_t offset = 0;
 
-    void* Allocate(size_t size) {
-        size_t alignedSize = (size + 31) & ~31;
-        if (offset + alignedSize > sizeof(pool)) {
-            offset = 0;
-        }
-        void* ptr = &pool[offset];
-        offset += alignedSize;
-        return ptr;
-    }
+	ThreadArena() noexcept : offset(0) {}
 
-    void Clear() {
-        offset = 0;
-    }
+	void* Allocate(size_t size) {
+		size_t alignedSize = (size + 31) & ~31;
+		if (offset + alignedSize > sizeof(memoryPool)) {
+			offset = 0;
+		}
+		void* ptr = &memoryPool[offset];
+		offset += alignedSize;
+		return ptr;
+	}
+
+	void Clear() { offset = 0; }
 };
 
-thread_local ThreadArena WorkerArena;
+inline std::atomic<bool> ENGINE = true;
+inline unsigned long long listenSock = INVALID_SOCKET;
+inline HANDLE hIOCP = NULL;
+inline std::unordered_map<unsigned long long, PLAYER_SESSION> ActiveSessions;
+inline CRITICAL_SECTION SessionLock;
+inline std::vector<GAME_ENTITY> GlobalEntities;
+inline thread_local ThreadArena WorkerArena;
 
-// AVX2 SIMD Perlin Noise Engine
+struct Console {
+	void* hOut = nullptr;
+	void* hIn = nullptr;
+	void* hErr = nullptr;
+	unsigned long written = 0;
+	std::basic_string<wchar_t, std::char_traits<wchar_t>, std::allocator<wchar_t>> message;
+	bool Initialize() {
+		hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+		hIn = GetStdHandle(STD_INPUT_HANDLE);
+		hErr = GetStdHandle(STD_ERROR_HANDLE);
+		return (hOut != INVALID_HANDLE_VALUE) && (hIn != INVALID_HANDLE_VALUE) && (hErr != INVALID_HANDLE_VALUE);
+	}
+};
+
+inline Console currentWindow;
+
+__forceinline static bool CheckHardwareInstructionSupport() {
+	int cpuInfo[4] = { 0 };
+	__cpuid(cpuInfo, 1);
+	bool supportsRDRAND = (cpuInfo[2] & (1 << 30)) != 0;
+	__cpuid(cpuInfo, 7);
+	bool supportsAVX2 = (cpuInfo[1] & (1 << 5)) != 0;
+	return supportsRDRAND && supportsAVX2;
+}
+
+constexpr unsigned long long WriteVarIntToBuffer(char* dest, int value) {
+	size_t written = 0;
+	unsigned int uValue = static_cast<unsigned int>(value);
+	do {
+		char byte = static_cast<char>(uValue & 0x7F);
+		uValue >>= 7;
+		if (uValue != 0) byte |= 0x80;
+		dest[written++] = byte;
+	} while (uValue != 0);
+	return written;
+}
+
+static int ReadVarInt(const uint8_t* buf, size_t maxLen, size_t& bytesRead) {
+	int value = 0;
+	int bitOffset = 0;
+	bytesRead = 0;
+	while (bytesRead < maxLen) {
+		uint8_t b = buf[bytesRead++];
+		value |= (b & 0x7F) << bitOffset;
+		if ((b & 0x80) == 0) return value;
+		bitOffset += 7;
+		if (bitOffset >= 35) break;
+	}
+	return 0;
+}
+
+static void SendWebSocketFrame(unsigned long long socket, const char* payload, size_t length) {
+	alignas(32) char headerBuffer[10];
+	size_t headerLen = 2;
+	headerBuffer[0] = static_cast<char>(0x82);
+	if (length <= 125) {
+		headerBuffer[1] = static_cast<char>(length);
+	}
+	else if (length <= 65535) {
+		headerBuffer[1] = 126;
+		headerBuffer[2] = static_cast<char>((length >> 8) & 0xFF);
+		headerBuffer[3] = static_cast<char>(length & 0xFF);
+		headerLen = 4;
+	}
+	else {
+		headerBuffer[1] = 127;
+		for (int i = 0; i < 8; ++i) {
+			headerBuffer[2 + i] = static_cast<char>((length >> ((7 - i) * 8)) & 0xFF);
+		}
+		headerLen = 10;
+	}
+
+	(void)send(socket, headerBuffer, static_cast<int>(headerLen), 0);
+	(void)send(socket, payload, static_cast<int>(length), 0);
+}
+
+static void BroadcastChatMessage(const std::string& sender, const std::string& message) {
+	alignas(32) char staticBuffer[2048];
+	char* jsonPayloadStart = staticBuffer + 32;
+	size_t maxJsonSize = sizeof(staticBuffer) - 32;
+
+	std::format_to_n_result<char*> formatResult = std::format_to_n(jsonPayloadStart, maxJsonSize,
+		"{{\"text\":\"[{}] {}\"}}", sender, message);
+
+	size_t jsonLen = formatResult.size;
+	if (jsonLen >= maxJsonSize) [[unlikely]] { return; }
+
+	constexpr char mcPacketId = 0x0F;
+	char stringVarInt[5];
+	size_t stringVarIntLen = WriteVarIntToBuffer(stringVarInt, static_cast<int>(jsonLen));
+
+	int mcInnerPayloadSize = static_cast<int>(1 + stringVarIntLen + jsonLen);
+	char mcTotalLengthVarInt[5];
+	size_t mcLengthVarIntLen = WriteVarIntToBuffer(mcTotalLengthVarInt, mcInnerPayloadSize);
+
+	size_t totalMcPacketSize = mcLengthVarIntLen + static_cast<size_t>(mcInnerPayloadSize);
+	size_t mcHeaderStartOffset = 32 - (mcLengthVarIntLen + 1 + stringVarIntLen);
+	char* mcWriteCursor = staticBuffer + mcHeaderStartOffset;
+
+	std::copy_n(mcTotalLengthVarInt, mcLengthVarIntLen, mcWriteCursor);
+	mcWriteCursor += mcLengthVarIntLen;
+	*mcWriteCursor = mcPacketId;
+	mcWriteCursor += 1;
+	std::copy_n(stringVarInt, stringVarIntLen, mcWriteCursor);
+
+	char* frameStart = staticBuffer + mcHeaderStartOffset;
+
+	EnterCriticalSection(&SessionLock);
+	for (const auto& [socket, session] : ActiveSessions) {
+		if (session.state == STATE_PLAY) {
+			SendWebSocketFrame(socket, frameStart, totalMcPacketSize);
+		}
+	}
+	LeaveCriticalSection(&SessionLock);
+}
+
+__forceinline uint32_t GetHardwareRandom() {
+	uint32_t val = 0;
+	for (int i = 0; i < 10; ++i) {
+		if (_rdrand32_step(&val)) return val;
+	}
+	return 13372026;
+}
+
+static void LoadOrCreateServerProperties(unsigned short& port, std::wstring& mode) {
+	std::unordered_map<std::string, std::string> props;
+	std::ifstream file("server.properties");
+
+	if (!file.is_open()) {
+		std::ofstream outFile("server.properties");
+		outFile << "# Server Properties for Eaglercraft 1.12.2 Native Server\n";
+		outFile << "server-port=26565\n";
+		outFile << "gamemode=survival\n";
+		outFile << "view-distance=6\n";
+		outFile.close();
+		port = 26565;
+		return;
+	}
+
+	std::string line;
+	while (std::getline(file, line)) {
+		if (line.empty() || line[0] == '#') continue;
+		std::istringstream is_line(line);
+		std::string key, value;
+		if (std::getline(is_line, key, '=') && std::getline(is_line, value)) {
+			props[key] = value;
+		}
+	}
+
+	if (props.count("server-port")) {
+		port = static_cast<unsigned short>(std::stoi(props["server-port"]));
+	}
+}
+
 class AVX2NoiseEngine {
+private:
+	alignas(32) int32_t p_int[512];
+
+	void InitPermutation(uint32_t seed) {
+		uint8_t p[256];
+		std::iota(std::begin(p), std::end(p), 0);
+
+		uint32_t state = seed;
+		for (int i = 255; i > 0; i--) {
+			state = state * 1664525ULL + 1013904223ULL;
+			int j = state % (i + 1);
+			std::swap(p[i], p[j]);
+		}
+		for (int i = 0; i < 256; i++) {
+			p_int[i] = static_cast<int32_t>(p[i]);
+			p_int[256 + i] = static_cast<int32_t>(p[i]);
+		}
+	}
+
+	inline __m256d Fade_AVX2(__m256d t) {
+		__m256d six = _mm256_set1_pd(6.0);
+		__m256d fifteen = _mm256_set1_pd(15.0);
+		__m256d ten = _mm256_set1_pd(10.0);
+		__m256d res = _mm256_fmsub_pd(t, six, fifteen);
+		res = _mm256_fmadd_pd(t, res, ten);
+		__m256d t3 = _mm256_mul_pd(t, _mm256_mul_pd(t, t));
+		return _mm256_mul_pd(t3, res);
+	}
+
+	inline __m256d Lerp_AVX2(__m256d t, __m256d a, __m256d b) {
+		return _mm256_fmadd_pd(t, _mm256_sub_pd(b, a), a);
+	}
+
+	inline __m256d Grad_AVX2(__m256i hash, __m256d x, __m256d y) {
+		__m256i h = _mm256_and_si256(hash, _mm256_set1_epi32(7));
+		__m256d x_sign = _mm256_and_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi32(_mm256_and_si256(h, _mm256_set1_epi32(1)), _mm256_set1_epi32(0))), x);
+		__m256d y_sign = _mm256_and_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi32(_mm256_and_si256(h, _mm256_set1_epi32(2)), _mm256_set1_epi32(0))), y);
+		return _mm256_add_pd(x_sign, y_sign);
+	}
+
 public:
-    static __m256d Fade(__m256d t) {
-        __m256d t3 = _mm256_mul_pd(_mm256_mul_pd(t, t), t);
-        __m256d t4 = _mm256_mul_pd(t3, t);
-        __m256d t5 = _mm256_mul_pd(t4, t);
+	AVX2NoiseEngine(uint32_t seed) { InitPermutation(seed); }
 
-        __m256d c6 = _mm256_set1_pd(6.0);
-        __m256d c15 = _mm256_set1_pd(15.0);
-        __m256d c10 = _mm256_set1_pd(10.0);
+	void SampleNoise4(__m256d x, __m256d y, double* outArray) {
+		__m256d x_floor = _mm256_floor_pd(x);
+		__m256d y_floor = _mm256_floor_pd(y);
 
-        __m256d term = _mm256_sub_pd(_mm256_mul_pd(t, c6), c15);
-        term = _mm256_add_pd(_mm256_mul_pd(t, term), c10);
-        return _mm256_mul_pd(t3, term);
-    }
+		__m128i X_128 = _mm256_cvtpd_epi32(x_floor);
+		__m128i Y_128 = _mm256_cvtpd_epi32(y_floor);
+		__m256i X_raw = _mm256_castsi128_si256(X_128);
+		__m256i Y_raw = _mm256_castsi128_si256(Y_128);
 
-    static __m256d Grad(__m256i hash, __m256d x, __m256d y) {
-        alignas(32) int32_t h[4];
-        alignas(32) double xv[4], yv[4], res[4];
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(h), _mm256_castsi256_si128(hash));
-        _mm256_store_pd(xv, x);
-        _mm256_store_pd(yv, y);
+		__m256i X = _mm256_and_si256(X_raw, _mm256_set1_epi32(255));
+		__m256i Y = _mm256_and_si256(Y_raw, _mm256_set1_epi32(255));
 
-        for (int i = 0; i < 4; ++i) {
-            int g = h[i] & 7;
-            double u = g < 4 ? xv[i] : yv[i];
-            double v = g < 4 ? yv[i] : xv[i];
-            res[i] = ((g & 1) ? -u : u) + ((g & 2) ? -2.0 * v : 2.0 * v);
-        }
-        return _mm256_load_pd(res);
-    }
+		__m256d x_frac = _mm256_sub_pd(x, x_floor);
+		__m256d y_frac = _mm256_sub_pd(y, y_floor);
 
-    static __m256d SampleNoise4(__m256d vx, __m256d vy, const int32_t* p) {
-        __m256d xi = _mm256_floor_pd(vx);
-        __m256d yi = _mm256_floor_pd(vy);
+		__m256d u = Fade_AVX2(x_frac);
+		__m256d v = Fade_AVX2(y_frac);
 
-        __m256i X = _mm256_cvtpd_epi32(_mm256_and_pd(xi, _mm256_set1_pd(255.0)));
-        __m256i Y = _mm256_cvtpd_epi32(_mm256_and_pd(yi, _mm256_set1_pd(255.0)));
+		__m256i p_X = _mm256_i32gather_epi32((const int*)p_int, X, 4);
+		__m256i p_Y = _mm256_i32gather_epi32((const int*)p_int, Y, 4);
 
-        __m256d xf = _mm256_sub_pd(vx, xi);
-        __m256d yf = _mm256_sub_pd(vy, yi);
+		__m256i A = _mm256_add_epi32(p_X, p_Y);
+		__m256i B = _mm256_add_epi32(_mm256_i32gather_epi32((const int*)p_int, _mm256_add_epi32(X, _mm256_set1_epi32(1)), 4), p_Y);
 
-        __m256d u = Fade(xf);
-        __m256d v = Fade(yf);
+		__m256d grad1 = Grad_AVX2(A, x_frac, y_frac);
+		__m256d grad2 = Grad_AVX2(B, _mm256_sub_pd(x_frac, _mm256_set1_pd(1.0)), y_frac);
 
-        __m256i aa = _mm256_i32gather_epi32(p, X, 4);
-        aa = _mm256_add_epi32(aa, Y);
+		__m256i A_plus1 = _mm256_add_epi32(A, _mm256_set1_epi32(1));
+		__m256i B_plus1 = _mm256_add_epi32(B, _mm256_set1_epi32(1));
+		__m256d grad3 = Grad_AVX2(A_plus1, x_frac, _mm256_sub_pd(y_frac, _mm256_set1_pd(1.0)));
+		__m256d grad4 = Grad_AVX2(B_plus1, _mm256_sub_pd(x_frac, _mm256_set1_pd(1.0)), _mm256_sub_pd(y_frac, _mm256_set1_pd(1.0)));
 
-        alignas(32) int32_t indices[4];
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(indices), _mm256_castsi256_si128(aa));
-
-        int32_t p_aa[4], p_ab[4], p_ba[4], p_bb[4];
-        for (int i = 0; i < 4; ++i) {
-            p_aa[i] = p[indices[i]];
-            p_ab[i] = p[indices[i] + 1];
-            p_ba[i] = p[indices[i] + 16];
-            p_bb[i] = p[indices[i] + 17];
-        }
-
-        __m256i v_aa = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p_aa));
-        __m256i v_ab = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p_ab));
-        __m256i v_ba = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p_ba));
-        __m256i v_bb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p_bb));
-
-        __m256d g1 = Grad(v_aa, xf, yf);
-        __m256d g2 = Grad(v_ba, _mm256_sub_pd(xf, _mm256_set1_pd(1.0)), yf);
-        __m256d g3 = Grad(v_ab, xf, _mm256_sub_pd(yf, _mm256_set1_pd(1.0)));
-        __m256d g4 = Grad(v_bb, _mm256_sub_pd(xf, _mm256_set1_pd(1.0)), _mm256_sub_pd(yf, _mm256_set1_pd(1.0)));
-
-        __m256d x1 = _mm256_add_pd(g1, _mm256_mul_pd(u, _mm256_sub_pd(g2, g1)));
-        __m256d x2 = _mm256_add_pd(g3, _mm256_mul_pd(u, _mm256_sub_pd(g4, g3)));
-
-        return _mm256_add_pd(x1, _mm256_mul_pd(v, _mm256_sub_pd(x2, x1)));
-    }
+		__m256d res = Lerp_AVX2(v, Lerp_AVX2(u, grad1, grad2), Lerp_AVX2(u, grad3, grad4));
+		res = _mm256_mul_pd(_mm256_add_pd(res, _mm256_set1_pd(1.0)), _mm256_set1_pd(0.5));
+		_mm256_storeu_pd(outArray, res);
+	}
 };
 
-const int32_t PERM_TABLE[512] = {
-    151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,
-    8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,
-    35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,
-    134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,
-    55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,
-    18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,
-    226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,
-    17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,
-    167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,
-    246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,
-    14,239,107,49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,
-    4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,
-    156,180
-};
+static void GenerateWorldChunk(int chunkX, int chunkZ, uint8_t* outChunkData) {
+	static uint32_t seed = GetHardwareRandom();
+	static AVX2NoiseEngine terrainNoise(seed);
+	static AVX2NoiseEngine tempNoise(seed + 101);
+	static AVX2NoiseEngine moistureNoise(seed + 202);
 
-bool CheckHardwareInstructionSupport() {
-    int cpuInfo[4];
-    __cpuid(cpuInfo, 1);
-    bool avxSupport = (cpuInfo[2] & (1 << 28)) != 0;
-    bool rdrandSupport = (cpuInfo[2] & (1 << 30)) != 0;
-    __cpuidex(cpuInfo, 7, 0);
-    bool avx2Support = (cpuInfo[1] & (1 << 5)) != 0;
-    return avxSupport && avx2Support && rdrandSupport;
+	std::memset(outChunkData, 0, 65536);
+
+	alignas(32) static thread_local double terrain_res[4];
+	alignas(32) static thread_local double temp_res[4];
+	alignas(32) static thread_local double moisture_res[4];
+
+	for (int x = 0; x < 16; x += 4) {
+		__m256d base_x = _mm256_set_pd(
+			static_cast<double>((chunkX * 16) + x + 3),
+			static_cast<double>((chunkX * 16) + x + 2),
+			static_cast<double>((chunkX * 16) + x + 1),
+			static_cast<double>((chunkX * 16) + x)
+		);
+		__m256d freq = _mm256_set1_pd(0.005);
+		base_x = _mm256_mul_pd(base_x, freq);
+
+		for (int z = 0; z < 16; ++z) {
+			__m256d vecZ = _mm256_set1_pd(static_cast<double>((chunkZ * 16) + z));
+			vecZ = _mm256_mul_pd(vecZ, freq);
+
+			terrainNoise.SampleNoise4(base_x, vecZ, terrain_res);
+			tempNoise.SampleNoise4(base_x, vecZ, temp_res);
+			moistureNoise.SampleNoise4(base_x, vecZ, moisture_res);
+
+			for (int subX = 0; subX < 4; ++subX) {
+				int currentX = x + subX;
+				double tVal = temp_res[subX];
+				double mVal = moisture_res[subX];
+
+				BiomeID currentBiome = BIOME_PLAINS;
+				uint8_t surfaceBlock = 2; // Grass
+				uint8_t fillerBlock = 3;  // Dirt
+				double heightScale = 1.0;
+
+				if (tVal < 0.25) {
+					currentBiome = BIOME_ICE_SPIKES;
+					surfaceBlock = 79;
+					fillerBlock = 80;
+					heightScale = 1.6;
+				}
+				else if (tVal > 0.70 && mVal < 0.30) {
+					currentBiome = BIOME_DESERT;
+					surfaceBlock = 12;
+					fillerBlock = 12;
+					heightScale = 0.8;
+				}
+
+				int calculatedHeight = 55 + static_cast<int>(terrain_res[subX] * 30.0 * heightScale);
+				calculatedHeight = std::clamp(calculatedHeight, 5, 250);
+
+				for (int y = 0; y < 256; ++y) {
+					size_t index = (y * 256) + (z * 16) + currentX;
+
+					if (y == 0) {
+						outChunkData[index] = 7; // Bedrock
+					}
+					else if (y < calculatedHeight - 4) {
+						outChunkData[index] = 1; // Stone
+					}
+					else if (y < calculatedHeight) {
+						outChunkData[index] = fillerBlock;
+					}
+					else if (y == calculatedHeight) {
+						outChunkData[index] = surfaceBlock;
+					}
+				}
+			}
+		}
+	}
+	_mm256_zeroupper();
 }
 
-void LoadOrCreateServerProperties(unsigned short& port, std::wstring& mode) {
-    port = 25565;
-    mode = L"Eaglercraft-1.12.2-Native";
+static void GarbageCollectStrayEntities() {
+	unsigned long long currentTime = static_cast<unsigned long long>(GetTickCount64() / 1000);
+	size_t initialSize = GlobalEntities.size();
+
+	EnterCriticalSection(&SessionLock);
+	GlobalEntities.erase(std::remove_if(GlobalEntities.begin(), GlobalEntities.end(),
+		[currentTime](GAME_ENTITY& entity) {
+			bool playerNearby = false;
+			for (const auto& [socket, session] : ActiveSessions) {
+				if (session.state == STATE_PLAY) {
+					int dx = entity.posX - static_cast<int>(session.playerX);
+					int dz = entity.posZ - static_cast<int>(session.playerZ);
+					if (((dx * dx) + (dz * dz)) <= 16384) {
+						playerNearby = true;
+						entity.lastActiveTime = currentTime;
+						break;
+					}
+				}
+			}
+			return !playerNearby && ((currentTime - entity.lastActiveTime) >= 1800);
+		}),
+		GlobalEntities.end()
+	);
+	LeaveCriticalSection(&SessionLock);
+
+	size_t removedCount = initialSize - GlobalEntities.size();
+	if (removedCount > 0) {
+		currentWindow.message = std::format(L"[Entity GC] Evicted {} stray unified mobs/projectiles from memory pools.\n", removedCount);
+		WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned long>(currentWindow.message.size()), &currentWindow.written, NULL);
+	}
 }
 
-BOOL WINAPI ConsoleCtrlHandler(DWORD fdwCtrlType) {
-    if (fdwCtrlType == CTRL_C_EVENT || fdwCtrlType == CTRL_CLOSE_EVENT) {
-        ENGINE.store(false);
-        return TRUE;
-    }
-    return FALSE;
+static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
+	// Allocate buffers out of WorkerArena instead of the stack
+	char* packet = reinterpret_cast<char*>(WorkerArena.Allocate(16384));
+	char* framed = reinterpret_cast<char*>(WorkerArena.Allocate(16400));
+	size_t p = 0;
+
+	packet[p++] = 0x20; // Chunk Data Packet ID
+
+	int32_t netX = _byteswap_ulong(chunkX);
+	int32_t netZ = _byteswap_ulong(chunkZ);
+	std::memcpy(&packet[p], &netX, 4); p += 4;
+	std::memcpy(&packet[p], &netZ, 4); p += 4;
+
+	packet[p++] = 0x01; // Full chunk flag
+
+	p += WriteVarIntToBuffer(&packet[p], 0x01); // Primary Bitmask
+
+	uint8_t* blockData = reinterpret_cast<uint8_t*>(WorkerArena.Allocate(65536));
+	GenerateWorldChunk(chunkX, chunkZ, blockData);
+
+	// Calculate section size (Paletted layout)
+	size_t dataLen = 1 + 1 + 2 + (4096 * 13 / 64) * 8 + 2048 + 2048;
+	p += WriteVarIntToBuffer(&packet[p], static_cast<int>(dataLen));
+
+	packet[p++] = 13; // Bits per block palette
+	p += WriteVarIntToBuffer(&packet[p], 0); // Palette Length 0 (Direct ID mapping)
+
+	// 13-bit Direct-Packed Long Array Data Structure
+	size_t longCount = (4096 * 13) / 64;
+	p += WriteVarIntToBuffer(&packet[p], static_cast<int>(longCount));
+
+	uint64_t currentLong = 0;
+	int bitOffset = 0;
+
+	for (int y = 0; y < 16; ++y) {
+		for (int z = 0; z < 16; ++z) {
+			for (int x = 0; x < 16; ++x) {
+				size_t flatIdx = (y * 256) + (z * 16) + x;
+				uint64_t val = static_cast<uint64_t>(blockData[flatIdx]) << 4;
+
+				currentLong |= (val << bitOffset);
+				bitOffset += 13;
+
+				if (bitOffset >= 64) {
+					uint64_t netLong = _byteswap_uint64(currentLong);
+					std::memcpy(&packet[p], &netLong, 8); p += 8;
+					bitOffset -= 64;
+					currentLong = (bitOffset > 0) ? (val >> (13 - bitOffset)) : 0;
+				}
+			}
+		}
+	}
+	if (bitOffset > 0) {
+		uint64_t netLong = _byteswap_uint64(currentLong);
+		std::memcpy(&packet[p], &netLong, 8); p += 8;
+	}
+
+	std::memset(&packet[p], 0xFF, 2048); p += 2048; // Block light
+	std::memset(&packet[p], 0xFF, 2048); p += 2048; // Sky light
+	std::memset(&packet[p], 1, 256); p += 256;      // Biomes
+
+	p += WriteVarIntToBuffer(&packet[p], 0); // 0 NBT Block Entities
+
+	// Framing
+	char vLen[5];
+	size_t vLenSize = WriteVarIntToBuffer(vLen, static_cast<int>(p));
+
+	std::copy_n(vLen, vLenSize, framed);
+	std::copy_n(packet, p, framed + vLenSize);
+
+	SendWebSocketFrame(socket, framed, vLenSize + p);
+
+	// Reset arena offset at the very end of processing
+	WorkerArena.Clear();
 }
 
-// Protocol VarInt Encoding/Decoding
-void WriteVarIntToBuffer(std::vector<uint8_t>& buf, int32_t value) {
-    uint32_t uval = static_cast<uint32_t>(value);
-    while (true) {
-        if ((uval & ~0x7F) == 0) {
-            buf.push_back(static_cast<uint8_t>(uval));
-            return;
-        }
-        buf.push_back(static_cast<uint8_t>((uval & 0x7F) | 0x80));
-        uval >>= 7;
-    }
+static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, size_t len) {
+	if (len < 1) return;
+
+	EnterCriticalSection(&SessionLock);
+	PLAYER_SESSION& session = ActiveSessions[ctx->socket];
+	LeaveCriticalSection(&SessionLock);
+
+	size_t cursor = 0;
+	size_t packetLenRead = 0;
+	int packetLength = ReadVarInt(payload, len, packetLenRead);
+	cursor += packetLenRead;
+
+	if (cursor >= len) return;
+
+	size_t idLenRead = 0;
+	int packetId = ReadVarInt(payload + cursor, len - cursor, idLenRead);
+	cursor += idLenRead;
+
+	if (session.state == STATE_HANDSHAKE) {
+		if (packetId == 0x00) { session.state = STATE_LOGIN; }
+	}
+	else if (session.state == STATE_LOGIN) {
+		if (packetId == 0x00) { // Login Start
+			size_t strLenRead = 0;
+			int strLen = ReadVarInt(payload + cursor, len - cursor, strLenRead);
+			cursor += strLenRead;
+
+			if (strLen > 0 && strLen <= 16 && cursor + strLen <= len) {
+				std::memcpy(session.username, payload + cursor, strLen);
+				session.username[strLen] = '\0';
+			}
+
+			// Respond with Login Success (0x02)
+			alignas(32) char resp[128];
+			size_t rp = 0;
+			resp[rp++] = 0x02;
+
+			std::string uuidStr = "c06180a0-6f91-424a-9e19-33152ef61d16";
+			rp += WriteVarIntToBuffer(&resp[rp], static_cast<int>(uuidStr.length()));
+			std::copy_n(uuidStr.c_str(), uuidStr.length(), &resp[rp]);
+			rp += uuidStr.length();
+
+			std::string userStr(session.username);
+			rp += WriteVarIntToBuffer(&resp[rp], static_cast<int>(userStr.length()));
+			std::copy_n(userStr.c_str(), userStr.length(), &resp[rp]);
+			rp += userStr.length();
+
+			char vLen[5];
+			size_t vLenSize = WriteVarIntToBuffer(vLen, static_cast<int>(rp));
+			alignas(32) char framed[256];
+			std::copy_n(vLen, vLenSize, framed);
+			std::copy_n(resp, rp, framed + vLenSize);
+
+			SendWebSocketFrame(ctx->socket, framed, vLenSize + rp);
+			session.state = STATE_PLAY;
+
+			// Dispatch Play Join Game (0x23)
+			alignas(32) char joinPacket[128];
+			size_t jp = 0;
+			joinPacket[jp++] = 0x23;
+			int32_t eId = _byteswap_ulong(session.entityId);
+			std::memcpy(&joinPacket[jp], &eId, 4); jp += 4;
+			joinPacket[jp++] = 1;
+			int32_t dim = 0;
+			std::memcpy(&joinPacket[jp], &dim, 4); jp += 4;
+			joinPacket[jp++] = 0;
+			joinPacket[jp++] = 10;
+			std::string levelType = "default";
+			jp += WriteVarIntToBuffer(&joinPacket[jp], static_cast<int>(levelType.length()));
+			std::copy_n(levelType.c_str(), levelType.length(), &joinPacket[jp]); jp += levelType.length();
+			joinPacket[jp++] = 0;
+
+			size_t jvSize = WriteVarIntToBuffer(vLen, static_cast<int>(jp));
+			std::copy_n(vLen, jvSize, framed);
+			std::copy_n(joinPacket, jp, framed + jvSize);
+			SendWebSocketFrame(ctx->socket, framed, jvSize + jp);
+
+			// Dispatch Position and Look (0x2F)
+			alignas(32) char posPacket[128];
+			size_t pp = 0;
+			posPacket[pp++] = 0x2F;
+			double px = 8.0, py = 65.0, pz = 8.0;
+			uint64_t nx, ny, nz;
+			std::memcpy(&nx, &px, 8); nx = _byteswap_uint64(nx); std::memcpy(&posPacket[pp], &nx, 8); pp += 8;
+			std::memcpy(&ny, &py, 8); ny = _byteswap_uint64(ny); std::memcpy(&posPacket[pp], &ny, 8); pp += 8;
+			std::memcpy(&nz, &pz, 8); nz = _byteswap_uint64(nz); std::memcpy(&posPacket[pp], &nz, 8); pp += 8;
+			float yaw = 0.0f, pitch = 0.0f;
+			uint32_t nyaw, npitch;
+			std::memcpy(&nyaw, &yaw, 4); nyaw = _byteswap_ulong(nyaw); std::memcpy(&posPacket[pp], &nyaw, 4); pp += 4;
+			std::memcpy(&npitch, &pitch, 4); npitch = _byteswap_ulong(npitch); std::memcpy(&posPacket[pp], &npitch, 4); pp += 4;
+			posPacket[pp++] = 0x00;
+			pp += WriteVarIntToBuffer(&posPacket[pp], 1);
+
+			size_t pvSize = WriteVarIntToBuffer(vLen, static_cast<int>(pp));
+			std::copy_n(vLen, pvSize, framed);
+			std::copy_n(posPacket, pp, framed + pvSize);
+			SendWebSocketFrame(ctx->socket, framed, pvSize + pp);
+
+			// Render radius 2 chunks
+			for (int cx = -2; cx <= 2; ++cx) {
+				for (int cz = -2; cz <= 2; ++cz) {
+					SendChunkColumn(ctx->socket, cx, cz);
+				}
+			}
+		}
+	}
+	else if (session.state == STATE_PLAY) {
+		if (packetId == 0x0D || packetId == 0x0E) {
+			if (cursor + 24 <= len) {
+				uint64_t rawX, rawY, rawZ;
+				std::memcpy(&rawX, payload + cursor, 8); rawX = _byteswap_uint64(rawX); std::memcpy(&session.playerX, &rawX, 8);
+				std::memcpy(&rawY, payload + cursor + 8, 8); rawY = _byteswap_uint64(rawY); std::memcpy(&session.playerY, &rawY, 8);
+				std::memcpy(&rawZ, payload + cursor + 16, 8); rawZ = _byteswap_uint64(rawZ); std::memcpy(&session.playerZ, &rawZ, 8);
+			}
+		}
+	} 
 }
 
-int32_t ReadVarInt(const uint8_t* buffer, size_t size, size_t& bytesRead) {
-    int32_t result = 0;
-    int32_t shift = 0;
-    bytesRead = 0;
-
-    while (bytesRead < size) {
-        uint8_t byte = buffer[bytesRead++];
-        result |= static_cast<int32_t>(byte & 0x7F) << shift;
-        if ((byte & 0x80) == 0) return result;
-        shift += 7;
-        if (shift >= 35) return 0; // Malformed VarInt
-    }
-    return result;
+static int __stdcall ConsoleCtrlHandler(unsigned long dwCtrlType) {
+	if (dwCtrlType == 0 || dwCtrlType == 5) {
+		ENGINE = false;
+		if (listenSock != INVALID_SOCKET) {
+			closesocket(listenSock);
+			listenSock = INVALID_SOCKET;
+		}
+		PostQueuedCompletionStatus(hIOCP, 0, 0, NULL);
+		return 1;
+	}
+	return 0;
 }
 
-// World Generation Helper
-void GenerateWorldChunk(int cx, int cz, uint8_t* outChunkData) {
-    std::memset(outChunkData, 0, 65536);
-
-    for (int x = 0; x < 16; ++x) {
-        for (int z = 0; z < 16; ++z) {
-            double worldX = (cx * 16 + x) * 0.05;
-            double worldZ = (cz * 16 + z) * 0.05;
-
-            __m256d vx = _mm256_set1_pd(worldX);
-            __m256d vy = _mm256_set1_pd(worldZ);
-
-            __m256d noiseVal = AVX2NoiseEngine::SampleNoise4(vx, vy, PERM_TABLE);
-            alignas(32) double nResult[4];
-            _mm256_store_pd(nResult, noiseVal);
-
-            int height = 64 + static_cast<int>(nResult[0] * 12.0);
-            height = (std::max)(1, (std::min)(255, height));
-
-            for (int y = 0; y <= height; ++y) {
-                int blockIdx = (y * 256) + (z * 16) + x;
-                if (y == 0) {
-                    outChunkData[blockIdx] = BLOCK_BEDROCK;
-                }
-                else if (y < height - 3) {
-                    outChunkData[blockIdx] = BLOCK_STONE;
-                }
-                else if (y < height) {
-                    outChunkData[blockIdx] = BLOCK_DIRT;
-                }
-                else {
-                    outChunkData[blockIdx] = BLOCK_GRASS;
-                }
-            }
-        }
-    }
-}
-
-// Low-level Direct Packet Sender via WebSockets
-void SendWebSocketFrame(SOCKET sock, const uint8_t* payload, size_t length) {
-    std::vector<uint8_t> frame;
-    frame.push_back(0x82); // Binary frame header
-
-    if (length <= 125) {
-        frame.push_back(static_cast<uint8_t>(length));
-    }
-    else if (length <= 65535) {
-        frame.push_back(126);
-        frame.push_back(static_cast<uint8_t>((length >> 8) & 0xFF));
-        frame.push_back(static_cast<uint8_t>(length & 0xFF));
-    }
-    else {
-        frame.push_back(127);
-        for (int i = 7; i >= 0; --i) {
-            frame.push_back(static_cast<uint8_t>((length >> (i * 8)) & 0xFF));
-        }
-    }
-
-    frame.insert(frame.end(), payload, payload + length);
-    (void)::send(sock, reinterpret_cast<const char*>(frame.data()), static_cast<int>(frame.size()), 0);
-}
-
-// Encodes and sends 1.12.2 Chunk Data Packet (0x20)
-void SendChunkColumn(SOCKET sock, int cx, int cz, const uint8_t* chunkData) {
-    std::vector<uint8_t> packet;
-    WriteVarIntToBuffer(packet, 0x20); // Chunk Data Packet ID
-
-    // Chunk Coordinates
-    uint32_t ncx = _byteswap_ulong(static_cast<uint32_t>(cx));
-    uint32_t ncz = _byteswap_ulong(static_cast<uint32_t>(cz));
-    packet.insert(packet.end(), reinterpret_cast<uint8_t*>(&ncx), reinterpret_cast<uint8_t*>(&ncx) + 4);
-    packet.insert(packet.end(), reinterpret_cast<uint8_t*>(&ncz), reinterpret_cast<uint8_t*>(&ncz) + 4);
-
-    packet.push_back(1); // Full chunk ground-up continuous
-    WriteVarIntToBuffer(packet, 0x01); // Primary Bit Mask (First 16-block section)
-
-    // Calculate Direct-Packed 13-bit Long Array Data Size
-    std::vector<uint8_t> dataBuf;
-    WriteVarIntToBuffer(dataBuf, 8); // Bits per block palette
-    WriteVarIntToBuffer(dataBuf, 0); // Palette size = 0 (Direct global palette)
-    WriteVarIntToBuffer(dataBuf, 64); // 64 uint64_t longs for 4096 blocks (13-bit packing)
-
-    for (int i = 0; i < 64; ++i) {
-        uint64_t dummyLong = 0;
-        dataBuf.insert(dataBuf.end(), reinterpret_cast<uint8_t*>(&dummyLong), reinterpret_cast<uint8_t*>(&dummyLong) + 8);
-    }
-
-    // Biomes (256 bytes)
-    for (int i = 0; i < 256; ++i) dataBuf.push_back(BIOME_PLAINS);
-
-    WriteVarIntToBuffer(packet, static_cast<int32_t>(dataBuf.size()));
-    packet.insert(packet.end(), dataBuf.begin(), dataBuf.end());
-
-    WriteVarIntToBuffer(packet, 0); // Number of Block Entities
-
-    SendWebSocketFrame(sock, packet.data(), packet.size());
-}
-
-// Dynamic Block Mutation Helper
-void SetWorldBlock(int32_t x, int32_t y, int32_t z, uint8_t blockId) {
-    if (y < 0 || y >= 256) return;
-    int cx = x >> 4;
-    int cz = z >> 4;
-    int bx = x & 15;
-    int bz = z & 15;
-
-    // Direct memory update into active world memory if in 64x64 region
-    if (cx >= 0 && cx < 64 && cz >= 0 && cz < 64) {
-        extern unsigned char* GlobalWorldMemory;
-        if (GlobalWorldMemory) {
-            int chunkIndex = (cz * 64) + cx;
-            uint8_t* chunkPtr = GlobalWorldMemory + (chunkIndex * 65536);
-            int blockIdx = (y * 256) + (bz * 16) + bx;
-            chunkPtr[blockIdx] = blockId;
-        }
-    }
-}
-
-// Packet Processor with Full Gameplay Decoding
-void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, size_t length) {
-    if (length == 0) return;
-
-    size_t bytesRead = 0;
-    int32_t packetId = ReadVarInt(payload, length, bytesRead);
-    uint8_t* body = payload + bytesRead;
-    size_t bodyLen = length - bytesRead;
-
-    // Packet 0x00: Login Start / Handshake Init
-    if (packetId == 0x00 && ctx->operation == OP_READ) {
-        std::vector<uint8_t> loginSuccess;
-        WriteVarIntToBuffer(loginSuccess, 0x02); // Login Success Packet
-        
-        std::string uuid = "00000000-0000-0000-0000-000000000001";
-        WriteVarIntToBuffer(loginSuccess, static_cast<int32_t>(uuid.length()));
-        loginSuccess.insert(loginSuccess.end(), uuid.begin(), uuid.end());
-
-        std::string username = "Player";
-        WriteVarIntToBuffer(loginSuccess, static_cast<int32_t>(username.length()));
-        loginSuccess.insert(loginSuccess.end(), username.begin(), username.end());
-
-        SendWebSocketFrame(ctx->socket, loginSuccess.data(), loginSuccess.size());
-
-        // Join Game (0x23)
-        std::vector<uint8_t> joinGame;
-        WriteVarIntToBuffer(joinGame, 0x23);
-        
-        int32_t eid = 100;
-        uint32_t neid = _byteswap_ulong(static_cast<uint32_t>(eid));
-        joinGame.insert(joinGame.end(), reinterpret_cast<uint8_t*>(&neid), reinterpret_cast<uint8_t*>(&neid) + 4);
-
-        joinGame.push_back(1); // Creative Mode
-        
-        int32_t dim = 0;
-        uint32_t ndim = _byteswap_ulong(static_cast<uint32_t>(dim));
-        joinGame.insert(joinGame.end(), reinterpret_cast<uint8_t*>(&ndim), reinterpret_cast<uint8_t*>(&ndim) + 4);
-
-        joinGame.push_back(0); // Difficulty
-        joinGame.push_back(100); // Max Players
-        
-        std::string levelType = "default";
-        WriteVarIntToBuffer(joinGame, static_cast<int32_t>(levelType.length()));
-        joinGame.insert(joinGame.end(), levelType.begin(), levelType.end());
-        joinGame.push_back(0); // Reduced Debug Info
-
-        SendWebSocketFrame(ctx->socket, joinGame.data(), joinGame.size());
-
-        // Player Position & Look Sync (0x2F)
-        std::vector<uint8_t> posPacket;
-        WriteVarIntToBuffer(posPacket, 0x2F);
-
-        double px = 0.0, py = 80.0, pz = 0.0;
-        float yaw = 0.0f, pitch = 0.0f;
-        uint64_t nx, ny, nz;
-        std::memcpy(&nx, &px, 8); nx = _byteswap_uint64(nx);
-        std::memcpy(&ny, &py, 8); ny = _byteswap_uint64(ny);
-        std::memcpy(&nz, &pz, 8); nz = _byteswap_uint64(nz);
-
-        posPacket.insert(posPacket.end(), reinterpret_cast<uint8_t*>(&nx), reinterpret_cast<uint8_t*>(&nx) + 8);
-        posPacket.insert(posPacket.end(), reinterpret_cast<uint8_t*>(&ny), reinterpret_cast<uint8_t*>(&ny) + 8);
-        posPacket.insert(posPacket.end(), reinterpret_cast<uint8_t*>(&nz), reinterpret_cast<uint8_t*>(&nz) + 8);
-
-        uint32_t nyaw, npitch;
-        std::memcpy(&nyaw, &yaw, 4); nyaw = _byteswap_ulong(nyaw);
-        std::memcpy(&npitch, &pitch, 4); npitch = _byteswap_ulong(npitch);
-        posPacket.insert(posPacket.end(), reinterpret_cast<uint8_t*>(&nyaw), reinterpret_cast<uint8_t*>(&nyaw) + 4);
-        posPacket.insert(posPacket.end(), reinterpret_cast<uint8_t*>(&npitch), reinterpret_cast<uint8_t*>(&npitch) + 4);
-
-        posPacket.push_back(0x00); // Teleport Flags
-        WriteVarIntToBuffer(posPacket, 1); // Teleport ID
-
-        SendWebSocketFrame(ctx->socket, posPacket.data(), posPacket.size());
-
-        // Stream initial 3x3 Chunk Grid
-        extern unsigned char* GlobalWorldMemory;
-        if (GlobalWorldMemory) {
-            for (int cz = -1; cz <= 1; ++cz) {
-                for (int cx = -1; cx <= 1; ++cx) {
-                    SendChunkColumn(ctx->socket, cx, cz, GlobalWorldMemory);
-                }
-            }
-        }
-    }
-    // Packet 0x0D / 0x0E / 0x0F: Player Position & Rotation Tracking
-    else if ((packetId == 0x0D || packetId == 0x0E || packetId == 0x0F) && bodyLen >= 24) {
-        double px, py, pz;
-        uint64_t rawX, rawY, rawZ;
-        std::memcpy(&rawX, body, 8); rawX = _byteswap_uint64(rawX);
-        std::memcpy(&rawY, body + 8, 8); rawY = _byteswap_uint64(rawY);
-        std::memcpy(&rawZ, body + 16, 8); rawZ = _byteswap_uint64(rawZ);
-        std::memcpy(&px, &rawX, 8);
-        std::memcpy(&py, &rawY, 8);
-        std::memcpy(&pz, &rawZ, 8);
-
-        EnterCriticalSection(&SessionLock);
-        auto it = ActiveSessions.find(ctx->socket);
-        if (it != ActiveSessions.end()) {
-            it->second.x = px;
-            it->second.y = py;
-            it->second.z = pz;
-        }
-        LeaveCriticalSection(&SessionLock);
-    }
-    // Packet 0x14: Player Digging (Block Break Mechanics)
-    else if (packetId == 0x14 && bodyLen >= 11) {
-        uint8_t status = body[0];
-        uint64_t val;
-        std::memcpy(&val, body + 1, 8);
-        val = _byteswap_uint64(val);
-
-        int32_t x = static_cast<int32_t>(val >> 38);
-        int32_t y = static_cast<int32_t>((val >> 26) & 0xFFF);
-        int32_t z = static_cast<int32_t>(val << 38 >> 38);
-
-        if (status == 0 || status == 2) { // Started or Finished digging -> Destroy Block
-            SetWorldBlock(x, y, z, BLOCK_AIR);
-        }
-    }
-    // Packet 0x1F: Player Block Placement
-    else if (packetId == 0x1F && bodyLen >= 12) {
-        uint64_t val;
-        std::memcpy(&val, body, 8);
-        val = _byteswap_uint64(val);
-
-        int32_t x = static_cast<int32_t>(val >> 38);
-        int32_t y = static_cast<int32_t>((val >> 26) & 0xFFF);
-        int32_t z = static_cast<int32_t>(val << 38 >> 38);
-        int32_t face = body[8];
-
-        // Offset target coordinates based on clicked block face
-        if (face == 0) y--;
-        else if (face == 1) y++;
-        else if (face == 2) z--;
-        else if (face == 3) z++;
-        else if (face == 4) x--;
-        else if (face == 5) x++;
-
-        uint8_t blockToPlace = BLOCK_STONE;
-        EnterCriticalSection(&SessionLock);
-        auto it = ActiveSessions.find(ctx->socket);
-        if (it != ActiveSessions.end()) {
-            blockToPlace = it->second.heldItemBlock;
-        }
-        LeaveCriticalSection(&SessionLock);
-
-        SetWorldBlock(x, y, z, blockToPlace);
-    }
-}
-
-// Entity & Session Maintenance Cleanup
-void GarbageCollectStrayEntities() {
-    EnterCriticalSection(&SessionLock);
-    // Prune stale or unreferenced player session handles
-    for (auto it = ActiveSessions.begin(); it != ActiveSessions.end();) {
-        if (it->first == INVALID_SOCKET) {
-            it = ActiveSessions.erase(it);
-        }
-        else {
-            ++it;
-        }
-    }
-    LeaveCriticalSection(&SessionLock);
-}
-#endif // DEIFINITIONS.hpp
+#endif // !DEFINITIONS_HPP
