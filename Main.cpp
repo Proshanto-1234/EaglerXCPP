@@ -378,11 +378,12 @@ int main(int argc, char* argv[]) {
 
 					(void)setsockopt(ctx->socket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&listenSock, sizeof(listenSock));
 					
-					// Begin zero-copy RIO reads immediately on newly accepted connection
-					PostRIOReceive(ctx);
-					
+					// FIXED: AcceptEx completion must re-arm AcceptEx first, then post RIO Receive on connected socket
 					(void)lpfnAcceptEx(listenSock, ctx->socket, ctx->buffer, 0,
 						sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16, &dwBytes, &ctx->overlapped);
+
+					// Begin zero-copy RIO reads immediately after connection is safely accepted
+					PostRIOReceive(ctx);
 				}
 			}
 		}
