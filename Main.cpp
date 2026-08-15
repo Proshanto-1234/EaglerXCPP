@@ -128,7 +128,7 @@ inline unsigned char* GlobalWorldMemory = nullptr;
 static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> requestData);
 static void avx2_apply_mask(uint8_t* data, size_t len, uint32_t mask);
 
-unsigned long __stdcall WorldGenerationWorkerThread(void* lpParam) {
+unsigned int __stdcall WorldGenerationWorkerThread(void* lpParam) {
 	NtPinThread(GetCurrentThread(), 2);
 	int index = 0;
 	for (int cz = 0; cz < 64; ++cz) {
@@ -149,11 +149,11 @@ int main(int argc, char* argv[]) {
 
 	if (!CheckHardwareInstructionSupport()) {
 		currentWindow.message = L"CRITICAL ERROR: AVX2 / RDRAND unsupported.\n";
-		WriteConsoleW(currentWindow.hErr, currentWindow.message.c_str(), static_cast<unsigned long>(currentWindow.message.size()), &currentWindow.written, NULL);
+		WriteConsoleW(currentWindow.hErr, currentWindow.message.c_str(), static_cast<unsigned int>(currentWindow.message.size()), &currentWindow.written, NULL);
 		return ERROR_UNSUPPORTED_HARDWARE;
 	}
 
-	unsigned long dwBytes = 0;
+	unsigned int dwBytes = 0;
 	std::wstring mode = L"Eaglercraft-1.12-u3";
 	unsigned short targetPort = 0;
 
@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
 	void* hGenThread = reinterpret_cast<void*>(_beginthreadex(NULL, 0, (_beginthreadex_proc_type)WorldGenerationWorkerThread, NULL, 0, &threadId));
 	if (hGenThread) CloseHandle(hGenThread);
 
-	std::pair<unsigned long, unsigned long> corePairs = DynamicGetLeastUsedCores();
+	std::pair<unsigned int, unsigned int> corePairs = DynamicGetLeastUsedCores();
 	NtPinThread(GetCurrentThread(), corePairs.first);
 
 	SetConsoleCtrlHandler(ConsoleCtrlHandler, 1);
@@ -192,16 +192,16 @@ int main(int argc, char* argv[]) {
 	// Load Registered I/O Subsystem
 	if (!InitializeRIOSubsystem(listenSock)) {
 		currentWindow.message = L"CRITICAL ERROR: Failed to initialize Registered I/O (RIO) Subsystem.\n";
-		WriteConsoleW(currentWindow.hErr, currentWindow.message.c_str(), static_cast<unsigned long>(currentWindow.message.size()), &currentWindow.written, NULL);
+		WriteConsoleW(currentWindow.hErr, currentWindow.message.c_str(), static_cast<unsigned int>(currentWindow.message.size()), &currentWindow.written, NULL);
 		return ERROR_INTERNAL;
 	}
 
 	currentWindow.message = L"Registered I/O (RIO) Native High-Throughput Subsystem Online.\n";
-	WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned long>(currentWindow.message.size()), &currentWindow.written, NULL);
+	WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned int>(currentWindow.message.size()), &currentWindow.written, NULL);
 
 	LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 	_GUID GuidAcceptEx = WSAID_ACCEPTEX;
-	unsigned long dwBytes_ioctl = 0;
+	unsigned int dwBytes_ioctl = 0;
 
 	(void)WSAIoctl(listenSock, ((0x80000000 | 0x40000000) | (0x08000000) | (6)), &GuidAcceptEx, sizeof(GuidAcceptEx), &lpfnAcceptEx, sizeof(lpfnAcceptEx), &dwBytes_ioctl, NULL, NULL);
 
@@ -248,11 +248,11 @@ int main(int argc, char* argv[]) {
 	}
 
 	currentWindow.message = std::format(L"Playable C++ Native Engine (RIO Activated) running on Port {}...\n", targetPort);
-	WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned long>(currentWindow.message.size()), &currentWindow.written, NULL);
+	WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned int>(currentWindow.message.size()), &currentWindow.written, NULL);
 
 	_OVERLAPPED_ENTRY entries[16] = {};
 	RIORESULT rioResults[32] = {};
-	unsigned long removed = 0;
+	unsigned int removed = 0;
 	unsigned long long lastCleanupTime = GetTickCount64() / 1000;
 
 	// Request notification for the RIO queue
@@ -366,7 +366,7 @@ int main(int argc, char* argv[]) {
 		// 2. CHECK IOCP FOR ACCEPTS / RECYCLES WITH ZERO TIMEOUT
 		removed = 0;
 		if (GetQueuedCompletionStatusEx(hIOCP, entries, 16, &removed, 0, FALSE)) {
-			for (unsigned long i = 0; i < removed; ++i) {
+			for (unsigned int i = 0; i < removed; ++i) {
 				RIO_CONNECTION_CONTEXT* ctx = (RIO_CONNECTION_CONTEXT*)entries[i].lpOverlapped;
 
 				if (ctx->operation == OP_SOKT_RECYCLE) {
@@ -443,10 +443,10 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 
 	void* hAlg = 0;
 	void* hHash = 0;
-	unsigned long cbHash = 20, cbHashObject = 0, cbData = 0;
+	unsigned int cbHash = 20, cbHashObject = 0, cbData = 0;
 
 	if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, L"SHA1", NULL, 0))) return "HTTP/1.1 500 Internal Error\r\n\r\n";
-	if (!BCRYPT_SUCCESS(BCryptGetProperty(hAlg, L"ObjectLength", reinterpret_cast<unsigned char*>(&cbHashObject), sizeof(unsigned long), &cbData, 0))) {
+	if (!BCRYPT_SUCCESS(BCryptGetProperty(hAlg, L"ObjectLength", reinterpret_cast<unsigned char*>(&cbHashObject), sizeof(unsigned int), &cbData, 0))) {
 		BCryptCloseAlgorithmProvider(hAlg, 0);
 		return "HTTP/1.1 500 Internal Error\r\n\r\n";
 	}
@@ -455,7 +455,7 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 	std::array<unsigned char, 20> hash;
 
 	if (!BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, hashObject.data(), cbHashObject, NULL, 0, 0)) ||
-		!BCRYPT_SUCCESS(BCryptHashData(hHash, (unsigned char*)combined.c_str(), static_cast<unsigned long>(combined.length()), 0)) ||
+		!BCRYPT_SUCCESS(BCryptHashData(hHash, (unsigned char*)combined.c_str(), static_cast<unsigned int>(combined.length()), 0)) ||
 		!BCRYPT_SUCCESS(BCryptFinishHash(hHash, hash.data(), cbHash, 0))) {
 		if (hHash) BCryptDestroyHash(hHash);
 		BCryptCloseAlgorithmProvider(hAlg, 0);
@@ -465,10 +465,10 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 	BCryptDestroyHash(hHash);
 	BCryptCloseAlgorithmProvider(hAlg, 0);
 
-	unsigned long outLen = 0;
-	CryptBinaryToStringA(hash.data(), (unsigned long)hash.size(), 1UL | WEBSOCKET_NOCRLF, NULL, &outLen);
+	unsigned int outLen = 0;
+	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), 1UL | WEBSOCKET_NOCRLF, NULL, &outLen);
 	std::string base64Key(outLen, '\0');
-	CryptBinaryToStringA(hash.data(), (unsigned long)hash.size(), WEBSOCKET_BASE64 | WEBSOCKET_NOCRLF, &base64Key[0], &outLen);
+	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), WEBSOCKET_BASE64 | WEBSOCKET_NOCRLF, &base64Key[0], &outLen);
 
 	while (!base64Key.empty() && (base64Key.back() == '\0' || base64Key.back() == '\n' || base64Key.back() == '\r')) {
 		base64Key.pop_back();
