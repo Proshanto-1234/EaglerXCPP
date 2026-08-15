@@ -23,4 +23,3 @@ There is already a VCXPROJ file in this repository which one can download alongs
 * ** Locate the project executable in the 'bin' directory
 ## Note ##
 The addition library dependencies have already been configured by in-source `#pragma` directives native to Microsoft Visual C/C++ (MSVC) compiler. Therefore, there is no need to set them again in the project configuration
-Additional Library dependencies have already been configured with `#pragma` preprocessing directives, one can skip setting the Project Configuration file for the same settings
