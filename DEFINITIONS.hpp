@@ -195,10 +195,11 @@ static void SendWebSocketFrame(unsigned long long socket, const char* payload, s
 		headerLen = 10;
 	}
 
-	(void)send(socket, headerBuffer, static_cast<int>(headerLen), 0);
-	(void)send(socket, payload, static_cast<int>(length), 0);
+	// Ensure we call send() with the proper SOCKET type to avoid pointer/integer mismatch.
+	unsigned long long s = static_cast<unsigned long long>(socket);
+	(void)send(s, headerBuffer, static_cast<int>(headerLen), 0);
+	(void)send(s, payload, static_cast<int>(length), 0);
 }
-
 static void BroadcastChatMessage(const std::string& sender, const std::string& message) {
 	alignas(32) char staticBuffer[2048];
 	char* jsonPayloadStart = staticBuffer + 32;
@@ -360,6 +361,7 @@ public:
 };
 
 static void GenerateWorldChunk(int chunkX, int chunkZ, uint8_t* outChunkData) {
+	if (outChunkData == nullptr) return; // guard: avoid dereferencing a null pointer
 	static uint32_t seed = GetHardwareRandom();
 	static AVX2NoiseEngine terrainNoise(seed);
 	static AVX2NoiseEngine tempNoise(seed + 101);
@@ -471,13 +473,16 @@ static void GarbageCollectStrayEntities() {
 
 static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 	char* packet = reinterpret_cast<char*>(WorkerArena.Allocate(16384));
+	if (!packet) { WorkerArena.Clear(); return; }
 	char* framed = reinterpret_cast<char*>(WorkerArena.Allocate(16400));
+	if (!framed) { WorkerArena.Clear(); return; }
 	size_t p = 0;
 
 	packet[p++] = 0x20;
 
 	int32_t netX = _byteswap_ulong(chunkX);
 	int32_t netZ = _byteswap_ulong(chunkZ);
+	if (p + 8 >= 16384) { WorkerArena.Clear(); return; }
 	std::memcpy(&packet[p], &netX, 4); p += 4;
 	std::memcpy(&packet[p], &netZ, 4); p += 4;
 
@@ -486,6 +491,7 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 	p += WriteVarIntToBuffer(&packet[p], 0x01);
 
 	uint8_t* blockData = reinterpret_cast<uint8_t*>(WorkerArena.Allocate(65536));
+	if (!blockData) { WorkerArena.Clear(); return; }
 	GenerateWorldChunk(chunkX, chunkZ, blockData);
 
 	size_t dataLen = 1 + 1 + 2 + (4096 * 13 / 64) * 8 + 2048 + 2048;
@@ -503,6 +509,7 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 	for (int y = 0; y < 16; ++y) {
 		for (int z = 0; z < 16; ++z) {
 			for (int x = 0; x < 16; ++x) {
+				if (p >= 16384) { WorkerArena.Clear(); return; } // bounds check
 				size_t flatIdx = (y * 256) + (z * 16) + x;
 				uint64_t val = static_cast<uint64_t>(blockData[flatIdx]) << 4;
 
@@ -511,6 +518,7 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 
 				if (bitOffset >= 64) {
 					uint64_t netLong = _byteswap_uint64(currentLong);
+					if (p + 8 > 16384) { WorkerArena.Clear(); return; }
 					std::memcpy(&packet[p], &netLong, 8); p += 8;
 					bitOffset -= 64;
 					currentLong = (bitOffset > 0) ? (val >> (13 - bitOffset)) : 0;
@@ -519,10 +527,12 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 		}
 	}
 	if (bitOffset > 0) {
+		if (p + 8 > 16384) { WorkerArena.Clear(); return; }
 		uint64_t netLong = _byteswap_uint64(currentLong);
 		std::memcpy(&packet[p], &netLong, 8); p += 8;
 	}
 
+	if (p + 2048 + 2048 + 256 + 16 > 16384) { WorkerArena.Clear(); return; } // ensure space for tails
 	std::memset(&packet[p], 0xFF, 2048); p += 2048;
 	std::memset(&packet[p], 0xFF, 2048); p += 2048;
 	std::memset(&packet[p], 1, 256); p += 256;
@@ -532,14 +542,17 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 	char vLen[5];
 	size_t vLenSize = WriteVarIntToBuffer(vLen, static_cast<int>(p));
 
+	// Ensure framed buffer is large enough
+	if (vLenSize + p > 16400) { WorkerArena.Clear(); return; }
+
 	std::copy_n(vLen, vLenSize, framed);
 	std::copy_n(packet, p, framed + vLenSize);
 
+	// Use SOCKET-typed socket internally for send() calls (SendWebSocketFrame performs this cast)
 	SendWebSocketFrame(socket, framed, vLenSize + p);
 
 	WorkerArena.Clear();
 }
-
 static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, size_t len) {
 	if (len < 1) return;
 
