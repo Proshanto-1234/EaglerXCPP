@@ -174,10 +174,12 @@ int main(int argc, char* argv[]) {
 
 	GlobalWorldMemory = reinterpret_cast<unsigned char*>(_aligned_malloc(64 * 64 * 65536, 32));
 	hGenerationThreadSignal = CreateEvent(NULL, TRUE, FALSE, NULL);
-	uint32_t threadId = 0;
+	unsigned int threadId = 0;
 	void* hGenThread = reinterpret_cast<void*>(_beginthreadex(NULL, 0, (_beginthreadex_proc_type)WorldGenerationWorkerThread, NULL, 0, &threadId));
-	if (hGenThread) CloseHandle(hGenThread);
-
+	if (hGenThread) {
+    	WaitForSingleObject(hGenThread, INFINITE);
+    	CloseHandle(hGenThread);
+	}
 	std::pair<unsigned int, unsigned int> corePairs = DynamicGetLeastUsedCores();
 	NtPinThread(GetCurrentThread(), corePairs.first);
 
@@ -220,8 +222,10 @@ int main(int argc, char* argv[]) {
 	for (int i = 0; i < 32; ++i) {
 		RIO_CONNECTION_CONTEXT* ctx = new RIO_CONNECTION_CONTEXT();
 		ctx->socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_REGISTERED_IO);
-		if (ctx->socket == INVALID_SOCKET) return ERROR_CRITICAL_MEMORY_FAILURE;
-
+		if (ctx->socket == INVALID_SOCKET) {
+    	delete ctx;
+    	return ERROR_CRITICAL_MEMORY_FAILURE;
+	}
 		ctx->bufferSliceIndex = i;
 		ctx->buffer = g_rioBufferPool + (i * RIO_SLICE_SIZE);
 		ctx->rxBufferOffset = 0;
@@ -327,9 +331,9 @@ int main(int argc, char* argv[]) {
 							payloadLen = lenByte;
 						}
 						else if (lenByte == 126) {
-							if (ctx->rxBufferOffset - readPos < 4) break;
-							payloadLen = (static_cast<size_t>(ptr[2]) << 8) | ptr[3];
-							headerSize = 4;
+    						if (ctx->rxBufferOffset - readPos < 4) break;
+    						payloadLen = ((static_cast<size_t>(static_cast<unsigned char>(ptr[2])) << 8) | static_cast<unsigned char>(ptr[3]));
+    						headerSize = 4;
 						}
 
 						bool isMasked = (ptr[1] & 0x80) != 0;
@@ -432,7 +436,7 @@ int main(int argc, char* argv[]) {
 
 static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> requestData) {
 	std::basic_string_view<char> searchKey = "Sec-WebSocket-Key: ";
-	unsigned long long pos = requestData.find(searchKey);
+	size_t pos = requestData.find(searchKey);
 	if (pos == std::string_view::npos) return "HTTP/1.1 400 Bad Request\r\n\r\n";
 
 	size_t start = pos + searchKey.length();
@@ -465,8 +469,8 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 	BCryptDestroyHash(hHash);
 	BCryptCloseAlgorithmProvider(hAlg, 0);
 
-	unsigned int outLen = 0;
-	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), 1UL | WEBSOCKET_NOCRLF, NULL, &outLen);
+	unsigned int outLen = 1;
+	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, 0, &outLen);
 	std::string base64Key(outLen, '\0');
 	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), WEBSOCKET_BASE64 | WEBSOCKET_NOCRLF, &base64Key[0], &outLen);
 
