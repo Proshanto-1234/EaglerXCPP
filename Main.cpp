@@ -95,10 +95,22 @@ static bool InitializeRIOSubsystem(SOCKET dummySock) {
 
 	// Lock physical RAM pages into afd.sys kernel driver space permanently
 	g_rioBufferId = g_rio.RIORegisterBuffer(reinterpret_cast<char*>(g_rioBufferPool), RIO_POOL_SIZE);
-	if (g_rioBufferId == RIO_INVALID_BUFFERID) return false;
+	if (g_rioBufferId == RIO_INVALID_BUFFERID) {
+		_aligned_free(g_rioBufferPool);
+		g_rioBufferPool = nullptr;
+		return false;
+	}
 
 	// Setup Notification Event for zero-CPU lock-free waiting
 	g_rioEvent = WSACreateEvent();
+	if (g_rioEvent == WSA_INVALID_EVENT) {
+		// rollback previously-allocated RIO buffer
+		g_rio.RIODeregisterBuffer(g_rioBufferId);
+		_aligned_free(g_rioBufferPool);
+		g_rioBufferPool = nullptr;
+		return false;
+	}
+
 	RIO_NOTIFICATION_COMPLETION notifyType;
 	notifyType.Type = RIO_EVENT_COMPLETION;
 	notifyType.EventNotification.Event = g_rioEvent;
@@ -106,7 +118,14 @@ static bool InitializeRIOSubsystem(SOCKET dummySock) {
 
 	// Create Ring-3 User-Mode Completion Queue bound to Event
 	g_rioCQ = g_rio.RIOCreateCompletionQueue(20000, &notifyType);
-	if (g_rioCQ == RIO_INVALID_CQ) return false;
+	if (g_rioCQ == RIO_INVALID_CQ) {
+		// rollback event and buffer
+		if (g_rioEvent != WSA_INVALID_EVENT) WSACloseEvent(g_rioEvent);
+		g_rio.RIODeregisterBuffer(g_rioBufferId);
+		_aligned_free(g_rioBufferPool);
+		g_rioBufferPool = nullptr;
+		return false;
+	}
 
 	g_rioEnabled = true;
 	return true;
@@ -188,9 +207,14 @@ int main(int argc, char* argv[]) {
 	WSAData wsaData = {};
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return 1;
 
-	hIOCP = CreateIoCompletionPort(((void*)(long long)-1), NULL, 0, 0);
+		hIOCP = CreateIoCompletionPort(((void*)(long long)-1), NULL, 0, 0);
 	listenSock = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_REGISTERED_IO);
-
+	if (listenSock == INVALID_SOCKET) {
+		currentWindow.message = L"CRITICAL ERROR: Failed to create listening socket.\n";
+		WriteConsoleW(currentWindow.hErr, currentWindow.message.c_str(),
+			static_cast<unsigned int>(currentWindow.message.size()), &currentWindow.written, NULL);
+		return ERROR_INTERNAL;
+	}
 	// Load Registered I/O Subsystem
 	if (!InitializeRIOSubsystem(listenSock)) {
 		currentWindow.message = L"CRITICAL ERROR: Failed to initialize Registered I/O (RIO) Subsystem.\n";
@@ -322,7 +346,6 @@ int main(int argc, char* argv[]) {
 							(void)TransmitFile(ctx->socket, NULL, 0, 0, &ctx->overlapped, NULL, TF_DISCONNECT | TF_REUSE_SOCKET);
 							break;
 						}
-
 						uint8_t lenByte = ptr[1] & 0x7F;
 						size_t headerSize = 2;
 						size_t payloadLen = 0;
@@ -331,11 +354,19 @@ int main(int argc, char* argv[]) {
 							payloadLen = lenByte;
 						}
 						else if (lenByte == 126) {
-    						if (ctx->rxBufferOffset - readPos < 4) break;
-    						payloadLen = ((static_cast<size_t>(static_cast<unsigned char>(ptr[2])) << 8) | static_cast<unsigned char>(ptr[3]));
-    						headerSize = 4;
+							if (ctx->rxBufferOffset - readPos < 4) break;
+							payloadLen = ((static_cast<size_t>(static_cast<unsigned char>(ptr[2])) << 8) | static_cast<unsigned char>(ptr[3]));
+							headerSize = 4;
 						}
-
+						else if (lenByte == 127) {
+							// 64-bit payload length (network byte order - big endian)
+							if (ctx->rxBufferOffset - readPos < 10) break;
+							payloadLen = 0;
+							for (int b = 0; b < 8; ++b) {
+								payloadLen = (payloadLen << 8) | static_cast<size_t>(static_cast<unsigned char>(ptr[2 + b]));
+							}
+							headerSize = 10;
+						}
 						bool isMasked = (ptr[1] & 0x80) != 0;
 						if (isMasked) headerSize += 4;
 
@@ -371,8 +402,7 @@ int main(int argc, char* argv[]) {
 		removed = 0;
 		if (GetQueuedCompletionStatusEx(hIOCP, entries, 16, &removed, 0, FALSE)) {
 			for (unsigned int i = 0; i < removed; ++i) {
-				RIO_CONNECTION_CONTEXT* ctx = (RIO_CONNECTION_CONTEXT*)entries[i].lpOverlapped;
-
+				RIO_CONNECTION_CONTEXT* ctx = reinterpret_cast<RIO_CONNECTION_CONTEXT*>(entries[i].lpCompletionKey);
 				if (ctx->operation == OP_SOKT_RECYCLE) {
 					ctx->operation = OP_HANDSHAKE;
 					ctx->rxBufferOffset = 0;
@@ -439,8 +469,9 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 	size_t pos = requestData.find(searchKey);
 	if (pos == std::string_view::npos) return "HTTP/1.1 400 Bad Request\r\n\r\n";
 
-	size_t start = pos + searchKey.length();
+		size_t start = pos + searchKey.length();
 	size_t end = requestData.find("\r\n", start);
+	if (end == std::string_view::npos) return "HTTP/1.1 400 Bad Request\r\n\r\n";
 	std::string_view clientKey = requestData.substr(start, end - start);
 
 	std::string combined = std::string(clientKey) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -454,6 +485,25 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 		BCryptCloseAlgorithmProvider(hAlg, 0);
 		return "HTTP/1.1 500 Internal Error\r\n\r\n";
 	}
+
+	std::vector<unsigned char> hashObject(cbHashObject);
+	std::array<unsigned char, 20> hash;
+
+	if (!BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, hashObject.data(), cbHashObject, NULL, 0, 0)) ||
+		!BCRYPT_SUCCESS(BCryptHashData(hHash, (unsigned char*)combined.c_str(), static_cast<unsigned int>(combined.length()), 0)) ||
+		!BCRYPT_SUCCESS(BCryptFinishHash(hHash, hash.data(), cbHash, 0))) {
+		if (hHash) BCryptDestroyHash(hHash);
+		BCryptCloseAlgorithmProvider(hAlg, 0);
+		return "HTTP/1.1 500 Internal Error\r\n\r\n";
+	}
+
+	BCryptDestroyHash(hHash);
+	BCryptCloseAlgorithmProvider(hAlg, 0);
+
+	unsigned int outLen = 1;
+	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, 0, &outLen);
+	std::string base64Key(outLen, '\0');
+	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, &base64Key[0], &outLen);
 
 	std::vector<unsigned char> hashObject(cbHashObject);
 	std::array<unsigned char, 20> hash;
