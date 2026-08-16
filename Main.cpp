@@ -465,33 +465,36 @@ int main(int argc, char* argv[]) {
 }
 
 static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> requestData) {
-	std::basic_string_view<char> searchKey = "Sec-WebSocket-Key: ";
+	constexpr std::string_view searchKey = "Sec-WebSocket-Key: ";
 	size_t pos = requestData.find(searchKey);
 	if (pos == std::string_view::npos) return "HTTP/1.1 400 Bad Request\r\n\r\n";
 
-		size_t start = pos + searchKey.length();
+	size_t start = pos + searchKey.length();
 	size_t end = requestData.find("\r\n", start);
 	if (end == std::string_view::npos) return "HTTP/1.1 400 Bad Request\r\n\r\n";
 	std::string_view clientKey = requestData.substr(start, end - start);
 
 	std::string combined = std::string(clientKey) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-	void* hAlg = 0;
-	void* hHash = 0;
-	unsigned int cbHash = 20, cbHashObject = 0, cbData = 0;
+	void* hAlg = nullptr;
+	void* hHash = nullptr;
+	unsigned int cbHashObject = 0, cbData = 0;
 
-	if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, L"SHA1", NULL, 0))) return "HTTP/1.1 500 Internal Error\r\n\r\n";
-	if (!BCRYPT_SUCCESS(BCryptGetProperty(hAlg, L"ObjectLength", reinterpret_cast<unsigned char*>(&cbHashObject), sizeof(unsigned int), &cbData, 0))) {
+	if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA1_ALGORITHM, NULL, 0))) {
+		return "HTTP/1.1 500 Internal Error\r\n\r\n";
+	}
+
+	if (!BCRYPT_SUCCESS(BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<unsigned char*>(&cbHashObject), sizeof(unsigned int), &cbData, 0))) {
 		BCryptCloseAlgorithmProvider(hAlg, 0);
 		return "HTTP/1.1 500 Internal Error\r\n\r\n";
 	}
 
-	std::vector<unsigned char> hashObject(cbHashObject);
-	std::array<unsigned char, 20> hash;
+	std::vector<unsigned char*> hashObject(cbHashObject);
+	std::array<unsigned char*, 20> hash;
 
 	if (!BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, hashObject.data(), cbHashObject, NULL, 0, 0)) ||
-		!BCRYPT_SUCCESS(BCryptHashData(hHash, (unsigned char*)combined.c_str(), static_cast<unsigned int>(combined.length()), 0)) ||
-		!BCRYPT_SUCCESS(BCryptFinishHash(hHash, hash.data(), cbHash, 0))) {
+		!BCRYPT_SUCCESS(BCryptHashData(hHash, reinterpret_cast<unsigned char*>(combined.data()), static_cast<unsigned long>(combined.length()), 0)) ||
+		!BCRYPT_SUCCESS(BCryptFinishHash(hHash, hash.data(), static_cast<unsigned long>(hash.size()), 0))) {
 		if (hHash) BCryptDestroyHash(hHash);
 		BCryptCloseAlgorithmProvider(hAlg, 0);
 		return "HTTP/1.1 500 Internal Error\r\n\r\n";
@@ -500,29 +503,11 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 	BCryptDestroyHash(hHash);
 	BCryptCloseAlgorithmProvider(hAlg, 0);
 
-	unsigned int outLen = 1;
-	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, 0, &outLen);
+	unsigned int outLen = 0;
+	CryptBinaryToStringA(hash.data(), static_cast<unsigned int>(hash.size()), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &outLen);
+	
 	std::string base64Key(outLen, '\0');
-	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, &base64Key[0], &outLen);
-
-	std::vector<unsigned char> hashObject(cbHashObject);
-	std::array<unsigned char, 20> hash;
-
-	if (!BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, hashObject.data(), cbHashObject, NULL, 0, 0)) ||
-		!BCRYPT_SUCCESS(BCryptHashData(hHash, (unsigned char*)combined.c_str(), static_cast<unsigned int>(combined.length()), 0)) ||
-		!BCRYPT_SUCCESS(BCryptFinishHash(hHash, hash.data(), cbHash, 0))) {
-		if (hHash) BCryptDestroyHash(hHash);
-		BCryptCloseAlgorithmProvider(hAlg, 0);
-		return "HTTP/1.1 500 Internal Error\r\n\r\n";
-	}
-
-	BCryptDestroyHash(hHash);
-	BCryptCloseAlgorithmProvider(hAlg, 0);
-
-	unsigned int outLen = 1;
-	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, 0, &outLen);
-	std::string base64Key(outLen, '\0');
-	CryptBinaryToStringA(hash.data(), (unsigned int)hash.size(), WEBSOCKET_BASE64 | WEBSOCKET_NOCRLF, &base64Key[0], &outLen);
+	CryptBinaryToStringA(hash.data(), static_cast<unsigned int>(hash.size()), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, base64Key.data(), &outLen);
 
 	while (!base64Key.empty() && (base64Key.back() == '\0' || base64Key.back() == '\n' || base64Key.back() == '\r')) {
 		base64Key.pop_back();
@@ -537,7 +522,6 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 		base64Key
 	);
 }
-
 static void avx2_apply_mask(uint8_t* data, size_t len, uint32_t mask) {
 	size_t i = 0;
 	__m256i v_mask = _mm256_set1_epi32(static_cast<int>(mask));
