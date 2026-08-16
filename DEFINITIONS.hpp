@@ -7,7 +7,7 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <mswsock.h> // Required for RIO types and definitions
+#include <mswsock.h>
 
 #include <cstdint>
 #include <atomic>
@@ -30,9 +30,8 @@ constexpr unsigned long WEBSOCKET_NOCRLF = 0x40000000;
 constexpr size_t PLAYER_STATUS_NORMAL = 0x00;
 constexpr size_t PLAYER_STATUS_OPERATOR = 0x01;
 
-// Registered I/O Memory Allocations
-constexpr DWORD RIO_POOL_SIZE  = 64 * 1024 * 1024; // 64 MB Pinned RAM Pool
-constexpr DWORD RIO_SLICE_SIZE = 32768;            // 32 KB per socket slice
+constexpr DWORD RIO_POOL_SIZE = 64 * 1024 * 1024;
+constexpr DWORD RIO_SLICE_SIZE = 32768;
 
 #if defined(min)
 #undef min
@@ -59,9 +58,6 @@ struct GAME_ENTITY {
 	unsigned long long lastActiveTime;
 };
 
-// ============================================================================
-// UPDATED FOR REGISTERED I/O (RIO) SUPPORT
-// ============================================================================
 struct CONNECTION_CONTEXT {
 	_OVERLAPPED overlapped;
 	unsigned long long socket;
@@ -70,7 +66,6 @@ struct CONNECTION_CONTEXT {
 	_WSABUF wsaBuf;
 	SOCKET_OPERATION operation;
 
-	// Native RIO Queue and Buffer primitives
 	RIO_RQ requestQueue;
 	RIO_BUF rioBuf;
 	DWORD bufferSliceIndex;
@@ -110,13 +105,13 @@ struct ThreadArena {
 	ThreadArena() noexcept : offset(0) {}
 
 	void* Allocate(size_t size) {
-    	size_t alignedSize = (size + 31) & ~31;
-    	if (offset + alignedSize > sizeof(memoryPool)) {
-        	return nullptr;
-    	}
-    	void* ptr = &memoryPool[offset];
-    	offset += alignedSize;
-    	return ptr;
+		size_t alignedSize = (size + 31) & ~31;
+		if (offset + alignedSize > sizeof(memoryPool)) {
+			return nullptr;
+		}
+		void* ptr = &memoryPool[offset];
+		offset += alignedSize;
+		return ptr;
 	}
 	void Clear() { offset = 0; }
 };
@@ -167,17 +162,18 @@ constexpr unsigned long long WriteVarIntToBuffer(char* dest, int value) {
 }
 
 static int ReadVarInt(const uint8_t* buf, size_t maxLen, size_t& bytesRead) {
-    int value = 0;
-    int bitOffset = 0;
-    bytesRead = 0;
-    while (bytesRead < maxLen && bitOffset < 32) {
-        uint8_t b = buf[bytesRead++];
-        value |= (b & 0x7F) << bitOffset;
-        if ((b & 0x80) == 0) return value;
-        bitOffset += 7;
-    }
-    return 0;
+	int value = 0;
+	int bitOffset = 0;
+	bytesRead = 0;
+	while (bytesRead < maxLen && bitOffset < 32) {
+		uint8_t b = buf[bytesRead++];
+		value |= (b & 0x7F) << bitOffset;
+		if ((b & 0x80) == 0) return value;
+		bitOffset += 7;
+	}
+	return 0;
 }
+
 static void SendWebSocketFrame(unsigned long long socket, const char* payload, size_t length) {
 	alignas(32) char headerBuffer[10];
 	size_t headerLen = 2;
@@ -399,8 +395,8 @@ static void GenerateWorldChunk(int chunkX, int chunkZ, uint8_t* outChunkData) {
 				double mVal = moisture_res[subX];
 
 				BiomeID currentBiome = BIOME_PLAINS;
-				uint8_t surfaceBlock = 2; // Grass
-				uint8_t fillerBlock = 3;  // Dirt
+				uint8_t surfaceBlock = 2;
+				uint8_t fillerBlock = 3;
 				double heightScale = 1.0;
 
 				if (tVal < 0.25) {
@@ -423,10 +419,10 @@ static void GenerateWorldChunk(int chunkX, int chunkZ, uint8_t* outChunkData) {
 					size_t index = (y * 256) + (z * 16) + currentX;
 
 					if (y == 0) {
-						outChunkData[index] = 7; // Bedrock
+						outChunkData[index] = 7;
 					}
 					else if (y < calculatedHeight - 4) {
-						outChunkData[index] = 1; // Stone
+						outChunkData[index] = 1;
 					}
 					else if (y < calculatedHeight) {
 						outChunkData[index] = fillerBlock;
@@ -474,33 +470,30 @@ static void GarbageCollectStrayEntities() {
 }
 
 static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
-	// Allocate buffers out of WorkerArena instead of the stack
 	char* packet = reinterpret_cast<char*>(WorkerArena.Allocate(16384));
 	char* framed = reinterpret_cast<char*>(WorkerArena.Allocate(16400));
 	size_t p = 0;
 
-	packet[p++] = 0x20; // Chunk Data Packet ID
+	packet[p++] = 0x20;
 
 	int32_t netX = _byteswap_ulong(chunkX);
 	int32_t netZ = _byteswap_ulong(chunkZ);
 	std::memcpy(&packet[p], &netX, 4); p += 4;
 	std::memcpy(&packet[p], &netZ, 4); p += 4;
 
-	packet[p++] = 0x01; // Full chunk flag
+	packet[p++] = 0x01;
 
-	p += WriteVarIntToBuffer(&packet[p], 0x01); // Primary Bitmask
+	p += WriteVarIntToBuffer(&packet[p], 0x01);
 
 	uint8_t* blockData = reinterpret_cast<uint8_t*>(WorkerArena.Allocate(65536));
 	GenerateWorldChunk(chunkX, chunkZ, blockData);
 
-	// Calculate section size (Paletted layout)
 	size_t dataLen = 1 + 1 + 2 + (4096 * 13 / 64) * 8 + 2048 + 2048;
 	p += WriteVarIntToBuffer(&packet[p], static_cast<int>(dataLen));
 
-	packet[p++] = 13; // Bits per block palette
-	p += WriteVarIntToBuffer(&packet[p], 0); // Palette Length 0 (Direct ID mapping)
+	packet[p++] = 13;
+	p += WriteVarIntToBuffer(&packet[p], 0);
 
-	// 13-bit Direct-Packed Long Array Data Structure
 	size_t longCount = (4096 * 13) / 64;
 	p += WriteVarIntToBuffer(&packet[p], static_cast<int>(longCount));
 
@@ -530,13 +523,12 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 		std::memcpy(&packet[p], &netLong, 8); p += 8;
 	}
 
-	std::memset(&packet[p], 0xFF, 2048); p += 2048; // Block light
-	std::memset(&packet[p], 0xFF, 2048); p += 2048; // Sky light
-	std::memset(&packet[p], 1, 256); p += 256;      // Biomes
+	std::memset(&packet[p], 0xFF, 2048); p += 2048;
+	std::memset(&packet[p], 0xFF, 2048); p += 2048;
+	std::memset(&packet[p], 1, 256); p += 256;
 
-	p += WriteVarIntToBuffer(&packet[p], 0); // 0 NBT Block Entities
+	p += WriteVarIntToBuffer(&packet[p], 0);
 
-	// Framing
 	char vLen[5];
 	size_t vLenSize = WriteVarIntToBuffer(vLen, static_cast<int>(p));
 
@@ -545,7 +537,6 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 
 	SendWebSocketFrame(socket, framed, vLenSize + p);
 
-	// Reset arena offset at the very end of processing
 	WorkerArena.Clear();
 }
 
@@ -554,8 +545,8 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 
 	EnterCriticalSection(&SessionLock);
 	if (ActiveSessions.find(ctx->socket) == ActiveSessions.end()) {
-    	LeaveCriticalSection(&SessionLock);
-    	return;
+		LeaveCriticalSection(&SessionLock);
+		return;
 	}
 	PLAYER_SESSION& session = ActiveSessions[ctx->socket];
 	LeaveCriticalSection(&SessionLock);
@@ -574,7 +565,7 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 		if (packetId == 0x00) { session.state = STATE_LOGIN; }
 	}
 	else if (session.state == STATE_LOGIN) {
-		if (packetId == 0x00) { // Login Start
+		if (packetId == 0x00) {
 			size_t strLenRead = 0;
 			int strLen = ReadVarInt(payload + cursor, len - cursor, strLenRead);
 			cursor += strLenRead;
@@ -584,7 +575,6 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 				session.username[strLen] = '\0';
 			}
 
-			// Respond with Login Success (0x02)
 			alignas(32) char resp[128];
 			size_t rp = 0;
 			resp[rp++] = 0x02;
@@ -608,7 +598,6 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 			SendWebSocketFrame(ctx->socket, framed, vLenSize + rp);
 			session.state = STATE_PLAY;
 
-			// Dispatch Play Join Game (0x23)
 			alignas(32) char joinPacket[128];
 			size_t jp = 0;
 			joinPacket[jp++] = 0x23;
@@ -629,7 +618,6 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 			std::copy_n(joinPacket, jp, framed + jvSize);
 			SendWebSocketFrame(ctx->socket, framed, jvSize + jp);
 
-			// Dispatch Position and Look (0x2F)
 			alignas(32) char posPacket[128];
 			size_t pp = 0;
 			posPacket[pp++] = 0x2F;
@@ -650,7 +638,6 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 			std::copy_n(posPacket, pp, framed + pvSize);
 			SendWebSocketFrame(ctx->socket, framed, pvSize + pp);
 
-			// Render radius 2 chunks
 			for (int cx = -2; cx <= 2; ++cx) {
 				for (int cz = -2; cz <= 2; ++cz) {
 					SendChunkColumn(ctx->socket, cx, cz);
@@ -667,7 +654,7 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 				std::memcpy(&rawZ, payload + cursor + 16, 8); rawZ = _byteswap_uint64(rawZ); std::memcpy(&session.playerZ, &rawZ, 8);
 			}
 		}
-	} 
+	}
 }
 
 static int __stdcall ConsoleCtrlHandler(unsigned long dwCtrlType) {
