@@ -110,15 +110,14 @@ struct ThreadArena {
 	ThreadArena() noexcept : offset(0) {}
 
 	void* Allocate(size_t size) {
-		size_t alignedSize = (size + 31) & ~31;
-		if (offset + alignedSize > sizeof(memoryPool)) {
-			offset = 0;
-		}
-		void* ptr = &memoryPool[offset];
-		offset += alignedSize;
-		return ptr;
+    	size_t alignedSize = (size + 31) & ~31;
+    	if (offset + alignedSize > sizeof(memoryPool)) {
+        	return nullptr;
+    	}
+    	void* ptr = &memoryPool[offset];
+    	offset += alignedSize;
+    	return ptr;
 	}
-
 	void Clear() { offset = 0; }
 };
 
@@ -168,19 +167,17 @@ constexpr unsigned long long WriteVarIntToBuffer(char* dest, int value) {
 }
 
 static int ReadVarInt(const uint8_t* buf, size_t maxLen, size_t& bytesRead) {
-	int value = 0;
-	int bitOffset = 0;
-	bytesRead = 0;
-	while (bytesRead < maxLen) {
-		uint8_t b = buf[bytesRead++];
-		value |= (b & 0x7F) << bitOffset;
-		if ((b & 0x80) == 0) return value;
-		bitOffset += 7;
-		if (bitOffset >= 35) break;
-	}
-	return 0;
+    int value = 0;
+    int bitOffset = 0;
+    bytesRead = 0;
+    while (bytesRead < maxLen && bitOffset < 32) {
+        uint8_t b = buf[bytesRead++];
+        value |= (b & 0x7F) << bitOffset;
+        if ((b & 0x80) == 0) return value;
+        bitOffset += 7;
+    }
+    return 0;
 }
-
 static void SendWebSocketFrame(unsigned long long socket, const char* payload, size_t length) {
 	alignas(32) char headerBuffer[10];
 	size_t headerLen = 2;
@@ -556,9 +553,12 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
 	if (len < 1) return;
 
 	EnterCriticalSection(&SessionLock);
+	if (ActiveSessions.find(ctx->socket) == ActiveSessions.end()) {
+    	LeaveCriticalSection(&SessionLock);
+    	return;
+	}
 	PLAYER_SESSION& session = ActiveSessions[ctx->socket];
 	LeaveCriticalSection(&SessionLock);
-
 	size_t cursor = 0;
 	size_t packetLenRead = 0;
 	int packetLength = ReadVarInt(payload, len, packetLenRead);
