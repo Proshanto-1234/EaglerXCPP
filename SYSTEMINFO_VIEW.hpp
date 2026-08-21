@@ -24,7 +24,13 @@ struct PROCESSOR_PERFORMANCE_INFORMATION {
 
 static pfnNtSetInformationThread NtSetInformationThread = nullptr;
 static pfnNtQuerySystemInformation NtQuerySystemInformation = nullptr;
-
+#ifndef _PROCESSOR_NUMBER_DEFINED
+struct PROCESSOR_NUMBER {
+    unsigned short Group;
+    unsigned char  Number;
+    unsigned char  Reserved;
+};
+#endif
 inline bool LoadNtFunctions() {
 	HINSTANCE__* hNtDll = GetModuleHandleW(L"ntdll.dll");
 	if (!hNtDll) return false;
@@ -35,13 +41,25 @@ inline bool LoadNtFunctions() {
 }
 
 inline void NtPinThread(void* hThread, unsigned long coreIndex) {
-	if (!NtSetInformationThread) [[unlikely]] return;
+    if (!NtSetInformationThread) [[unlikely]] return;
 
-	unsigned long long affinityMask = (static_cast<unsigned long long>(1) << coreIndex);
-	NtSetInformationThread(hThread, 4, &affinityMask, sizeof(unsigned long long));
+    // 1. Hard Affinity (Class 4)
+    unsigned long coreInGroup = coreIndex % 64;
+    unsigned long long affinityMask = (1ULL << coreInGroup);
+    NtSetInformationThread(hThread, 4, &affinityMask, sizeof(affinityMask));
 
-	unsigned long idealProcessor = coreIndex;
-	NtSetInformationThread(hThread, 13, &idealProcessor, sizeof(unsigned long));
+    // 2. Legacy Ideal Processor (Class 13)
+    unsigned long idealProcessor = coreInGroup;
+    NtSetInformationThread(hThread, 13, &idealProcessor, sizeof(idealProcessor));
+
+    // 3. Modern Ideal Processor Ex (Class 33)
+    PROCESSOR_NUMBER procNum = {
+        .Group = static_cast<unsigned short>(coreIndex / 64),
+        .Number = static_cast<unsigned char>(coreInGroup),
+        .Reserved = 0
+    };
+
+    NtSetInformationThread(hThread, 33, &procNum, sizeof(procNum));
 }
 
 static std::pair<unsigned long, unsigned long> DynamicGetLeastUsedCores() {
