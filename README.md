@@ -19,7 +19,7 @@ There is already a VCXPROJ file in this repository which one can download alongs
 * **Open the downloaded VCXPROJ file by right-clicking
 * **Set configuration to Release at the top ribbon (if not already set)**
 * **Ensure the project files are in the same directory and Enhanced Instruction Set is configured to AVX2**
-* **Press `F5` and wait
-* ** Locate the project executable in the 'bin' directory
+* **Press `F5` and wait**
+* **Locate the project executable in the 'bin' directory**
 ## Note ##
 The addition library dependencies have already been configured by in-source `#pragma` directives native to Microsoft Visual C/C++ (MSVC) compiler. Therefore, there is no need to set them again in the project configuration
