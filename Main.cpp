@@ -489,8 +489,8 @@ static std::string ProcessWebSocketHandshake(const std::basic_string_view<char> 
 		return "HTTP/1.1 500 Internal Error\r\n\r\n";
 	}
 
-	std::vector<unsigned char*> hashObject(cbHashObject);
-	std::array<unsigned char*, 20> hash;
+	std::vector<unsigned char> hashObject(cbHashObject);
+	std::array<unsigned char, 20> hash;
 
 	if (!BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, hashObject.data(), cbHashObject, NULL, 0, 0)) ||
 		!BCRYPT_SUCCESS(BCryptHashData(hHash, reinterpret_cast<unsigned char*>(combined.data()), static_cast<unsigned long>(combined.length()), 0)) ||
