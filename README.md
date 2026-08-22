@@ -16,7 +16,7 @@ A low-latency Minecraft 1.12.2 (Protocol Eaglercraft, WebSocket Connection) serv
 
 ## How to build the project
 There is already a VCXPROJ file in this repository which one can download alongside the main program files. In order to build this project in Visual studio, follow the steps below:
-* **Open the downloaded VCXPROJ file by right-clicking
+* **Open the downloaded VCXPROJ file by right-clicking**
 * **Set configuration to Release at the top ribbon (if not already set)**
 * **Ensure the project files are in the same directory and Enhanced Instruction Set is configured to AVX2**
 * **Press `F5` and wait**
