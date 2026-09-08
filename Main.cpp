@@ -204,6 +204,16 @@ int main(int argc, char* argv[]) {
 
 	SetConsoleCtrlHandler(ConsoleCtrlHandler, 1);
 
+	// Initialize GPU Chunk Serializer
+	if (g_gpuSerializer.Initialize()) {
+		currentWindow.message = L"[GPU] DirectX 11 Compute Shader Chunk Serializer Online.\n";
+		WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned int>(currentWindow.message.size()), &currentWindow.written, NULL);
+	}
+	else {
+		currentWindow.message = L"[GPU] Compute Shader unavailable, using CPU fallback for chunk serialization.\n";
+		WriteConsoleW(currentWindow.hOut, currentWindow.message.c_str(), static_cast<unsigned int>(currentWindow.message.size()), &currentWindow.written, NULL);
+	}
+
 	WSAData wsaData = {};
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return 1;
 
