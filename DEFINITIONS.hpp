@@ -22,6 +22,8 @@
 #include <sstream>
 #include <immintrin.h>
 
+#include "GPU_CHUNK_SERIALIZER.hpp"
+
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "mswsock.lib")
 
@@ -123,6 +125,7 @@ inline std::unordered_map<unsigned long long, PLAYER_SESSION> ActiveSessions;
 inline CRITICAL_SECTION SessionLock;
 inline std::vector<GAME_ENTITY> GlobalEntities;
 inline thread_local ThreadArena WorkerArena;
+inline GPUChunkSerializer g_gpuSerializer;
 
 struct Console {
 	void* hOut = nullptr;
@@ -503,33 +506,53 @@ static void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ) {
 	size_t longCount = (4096 * 13) / 64;
 	p += WriteVarIntToBuffer(&packet[p], static_cast<int>(longCount));
 
-	uint64_t currentLong = 0;
-	int bitOffset = 0;
+	// GPU-accelerated bit packing
+	alignas(32) uint64_t gpuPackedData[832] = {};
+	bool gpuSuccess = false;
 
-	for (int y = 0; y < 16; ++y) {
-		for (int z = 0; z < 16; ++z) {
-			for (int x = 0; x < 16; ++x) {
-				if (p >= 16384) { WorkerArena.Clear(); return; } // bounds check
-				size_t flatIdx = (y * 256) + (z * 16) + x;
-				uint64_t val = static_cast<uint64_t>(blockData[flatIdx]) << 4;
+	if (g_gpuSerializer.IsAvailable()) {
+		gpuSuccess = g_gpuSerializer.SerializeChunk(blockData, gpuPackedData);
+	}
 
-				currentLong |= (val << bitOffset);
-				bitOffset += 13;
+	if (gpuSuccess) {
+		// GPU path: copy pre-packed data with byte-swapping
+		for (size_t i = 0; i < 832; ++i) {
+			if (p + 8 > 16384) { WorkerArena.Clear(); return; }
+			uint64_t netLong = _byteswap_uint64(gpuPackedData[i]);
+			std::memcpy(&packet[p], &netLong, 8);
+			p += 8;
+		}
+	}
+	else {
+		// CPU fallback: original bit-packing logic
+		uint64_t currentLong = 0;
+		int bitOffset = 0;
 
-				if (bitOffset >= 64) {
-					uint64_t netLong = _byteswap_uint64(currentLong);
-					if (p + 8 > 16384) { WorkerArena.Clear(); return; }
-					std::memcpy(&packet[p], &netLong, 8); p += 8;
-					bitOffset -= 64;
-					currentLong = (bitOffset > 0) ? (val >> (13 - bitOffset)) : 0;
+		for (int y = 0; y < 16; ++y) {
+			for (int z = 0; z < 16; ++z) {
+				for (int x = 0; x < 16; ++x) {
+					if (p >= 16384) { WorkerArena.Clear(); return; }
+					size_t flatIdx = (y * 256) + (z * 16) + x;
+					uint64_t val = static_cast<uint64_t>(blockData[flatIdx]) << 4;
+
+					currentLong |= (val << bitOffset);
+					bitOffset += 13;
+
+					if (bitOffset >= 64) {
+						uint64_t netLong = _byteswap_uint64(currentLong);
+						if (p + 8 > 16384) { WorkerArena.Clear(); return; }
+						std::memcpy(&packet[p], &netLong, 8); p += 8;
+						bitOffset -= 64;
+						currentLong = (bitOffset > 0) ? (val >> (13 - bitOffset)) : 0;
+					}
 				}
 			}
 		}
-	}
-	if (bitOffset > 0) {
-		if (p + 8 > 16384) { WorkerArena.Clear(); return; }
-		uint64_t netLong = _byteswap_uint64(currentLong);
-		std::memcpy(&packet[p], &netLong, 8); p += 8;
+		if (bitOffset > 0) {
+			if (p + 8 > 16384) { WorkerArena.Clear(); return; }
+			uint64_t netLong = _byteswap_uint64(currentLong);
+			std::memcpy(&packet[p], &netLong, 8); p += 8;
+		}
 	}
 
 	if (p + 2048 + 2048 + 256 + 16 > 16384) { WorkerArena.Clear(); return; } // ensure space for tails
