@@ -118,15 +118,6 @@ struct ThreadArena {
 	void Clear() { offset = 0; }
 };
 
-inline std::atomic<bool> ENGINE = true;
-inline unsigned long long listenSock = INVALID_SOCKET;
-inline HANDLE hIOCP = NULL;
-inline std::unordered_map<unsigned long long, PLAYER_SESSION> ActiveSessions;
-inline CRITICAL_SECTION SessionLock;
-inline std::vector<GAME_ENTITY> GlobalEntities;
-inline thread_local ThreadArena WorkerArena;
-inline GPUChunkSerializer g_gpuSerializer;
-
 struct Console {
 	void* hOut = nullptr;
 	void* hIn = nullptr;
@@ -140,8 +131,6 @@ struct Console {
 		return (hOut != INVALID_HANDLE_VALUE) && (hIn != INVALID_HANDLE_VALUE) && (hErr != INVALID_HANDLE_VALUE);
 	}
 };
-
-inline Console currentWindow;
 
 __forceinline static bool CheckHardwareInstructionSupport() {
 	int cpuInfo[4] = { 0 };
