@@ -69,7 +69,7 @@ namespace NtDefaultClasses {
 
 inline bool DetectNtClassesViaWMI() {
 	// Initialize COM
-	HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+	long hr = CoInitializeEx(0, COINIT_MULTITHREADED);
 	if (FAILED(hr)) return false;
 
 	bool success = false;
@@ -153,18 +153,18 @@ inline bool DetectNtClassesViaWMI() {
 // ============================================================================
 
 inline bool DetectNtClassesViaRegistry() {
-	HKEY hKey = NULL;
-	LONG regStatus = RegOpenKeyExW(HKEY_LOCAL_MACHINE, 
+	HKEY__* hKey = NULL;
+	long regStatus = RegOpenKeyExW(HKEY_LOCAL_MACHINE, 
 		L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Subsystems", 
 		0, KEY_QUERY_VALUE, &hKey);
 
 	if (regStatus != ERROR_SUCCESS) return false;
 
 	bool success = false;
-	DWORD dataSize = sizeof(unsigned long);
+	unsigned long dataSize = sizeof(unsigned long);
 
 	// Attempt to read ThreadAffinityClass
-	if (RegQueryValueExW(hKey, L"ThreadAffinityClass", NULL, NULL, 
+	if (RegQueryValueExW(hKey, L"ThreadAffinityClass", 0, 0, 
 		(LPBYTE)&g_NtInfoClasses.ThreadAffinityClass, &dataSize) == ERROR_SUCCESS) {
 		success = true;
 	}
