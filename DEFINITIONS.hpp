@@ -124,11 +124,90 @@ struct Console {
 	void* hErr = nullptr;
 	unsigned long written = 0;
 	std::basic_string<wchar_t, std::char_traits<wchar_t>, std::allocator<wchar_t>> message;
+	int japansesFontLoaded = 0;  // 0 = not loaded, 1 = loaded, -1 = failed
+
 	bool Initialize() {
 		hOut = GetStdHandle(STD_OUTPUT_HANDLE);
 		hIn = GetStdHandle(STD_INPUT_HANDLE);
 		hErr = GetStdHandle(STD_ERROR_HANDLE);
-		return (hOut != INVALID_HANDLE_VALUE) && (hIn != INVALID_HANDLE_VALUE) && (hErr != INVALID_HANDLE_VALUE);
+
+		if ((hOut == INVALID_HANDLE_VALUE) || 
+			(hIn == INVALID_HANDLE_VALUE) || 
+			(hErr == INVALID_HANDLE_VALUE)) {
+			return false;
+		}
+
+		// Enable UTF-16 console mode and virtual terminal processing
+		DWORD dwMode = 0;
+		GetConsoleMode((HANDLE)hOut, &dwMode);
+		dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+		SetConsoleMode((HANDLE)hOut, dwMode);
+
+		// Try to load Japanese font
+		LoadJapaneseFont();
+
+		return true;
+	}
+
+private:
+	bool LoadJapaneseFont() {
+		// Get executable directory
+		wchar_t exePath[MAX_PATH];
+		if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) {
+			japansesFontLoaded = -1;
+			return false;
+		}
+
+		// Find last backslash to get directory
+		wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+		if (!lastSlash) {
+			japansesFontLoaded = -1;
+			return false;
+		}
+		*lastSlash = L'\0';
+
+		// Build full path to font file
+		wchar_t fontPath[MAX_PATH];
+		wcscpy_s(fontPath, MAX_PATH, exePath);
+		wcscat_s(fontPath, MAX_PATH, L"\\NotoSansMonoCJKjp-Regular.otf");
+
+		// Try to load font into memory (private to this process)
+		int fontCount = AddFontResourceExW(fontPath, FR_PRIVATE, NULL);
+
+		if (fontCount == 0) {
+			japansesFontLoaded = -1;
+			return false;
+		}
+
+		// Apply font to console
+		CONSOLE_FONT_INFOEX fontInfo = {};
+		fontInfo.cbSize = sizeof(CONSOLE_FONT_INFOEX);
+
+		if (!GetCurrentConsoleFontEx((HANDLE)hOut, FALSE, &fontInfo)) {
+			RemoveFontResourceExW(fontPath, FR_PRIVATE, NULL);
+			japansesFontLoaded = -1;
+			return false;
+		}
+
+		// Set font name
+		wcscpy_s(fontInfo.FaceName, LF_FACESIZE, L"Noto Sans Mono CJK JP");
+		fontInfo.dwFontSize.Y = 12;  // 12pt
+		fontInfo.dwFontSize.X = 0;   // Auto width
+
+		if (!SetCurrentConsoleFontEx((HANDLE)hOut, FALSE, &fontInfo)) {
+			RemoveFontResourceExW(fontPath, FR_PRIVATE, NULL);
+			japansesFontLoaded = -1;
+			return false;
+		}
+
+		japansesFontLoaded = 1;
+		return true;
+	}
+
+public:
+	~Console() {
+		// Font resources are automatically released when process exits
+		// RemoveFontResourceExW is called automatically by Windows
 	}
 };
 
@@ -160,6 +239,87 @@ void GarbageCollectStrayEntities();
 void SendChunkColumn(unsigned long long socket, int chunkX, int chunkZ);
 void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, size_t len);
 int __stdcall ConsoleCtrlHandler(unsigned long dwCtrlType);
+
+// ============================================================================
+// ENCODING UTILITIES
+// ============================================================================
+namespace encoding {
+	// Convert UTF-8 std::string to UTF-16 std::wstring
+	inline std::wstring utf8_to_utf16(const std::string& utf8_str) {
+		if (utf8_str.empty()) {
+			return std::wstring();
+		}
+
+		// Get required buffer size
+		int size_needed = MultiByteToWideChar(CP_UTF8, 0,
+			utf8_str.c_str(), (int)utf8_str.length(), NULL, 0);
+
+		if (size_needed <= 0) {
+			return std::wstring();
+		}
+
+		// Convert UTF-8 to UTF-16
+		std::wstring result(size_needed, 0);
+		MultiByteToWideChar(CP_UTF8, 0,
+			utf8_str.c_str(), (int)utf8_str.length(),
+			&result[0], size_needed);
+
+		return result;
+	}
+
+	// Convert UTF-16 std::wstring to UTF-8 std::string
+	inline std::string utf16_to_utf8(const std::wstring& utf16_str) {
+		if (utf16_str.empty()) {
+			return std::string();
+		}
+
+		// Get required buffer size
+		int size_needed = WideCharToMultiByte(CP_UTF8, 0,
+			utf16_str.c_str(), (int)utf16_str.length(), NULL, 0, NULL, NULL);
+
+		if (size_needed <= 0) {
+			return std::string();
+		}
+
+		// Convert UTF-16 to UTF-8
+		std::string result(size_needed, 0);
+		WideCharToMultiByte(CP_UTF8, 0,
+			utf16_str.c_str(), (int)utf16_str.length(),
+			&result[0], size_needed, NULL, NULL);
+
+		return result;
+	}
+
+	// Safe conversion with fallback for invalid characters
+	inline std::wstring utf8_to_utf16_safe(const std::string& utf8_str,
+		wchar_t fallback_char = L'?') {
+		if (utf8_str.empty()) {
+			return std::wstring();
+		}
+
+		// Try strict UTF-8 conversion first
+		int size_needed = MultiByteToWideChar(CP_UTF8,
+			MB_ERR_INVALID_CHARS,
+			utf8_str.c_str(), (int)utf8_str.length(), NULL, 0);
+
+		if (size_needed <= 0) {
+			// Invalid UTF-8 sequence, use lossy conversion
+			size_needed = MultiByteToWideChar(CP_UTF8, 0,
+				utf8_str.c_str(), (int)utf8_str.length(), NULL, 0);
+
+			if (size_needed <= 0) {
+				return std::wstring(1, fallback_char);
+			}
+		}
+
+		std::wstring result(size_needed, 0);
+		MultiByteToWideChar(CP_UTF8, 0,
+			utf8_str.c_str(), (int)utf8_str.length(),
+			&result[0], size_needed);
+
+		return result;
+	}
+}
 
 // ============================================================================
 // INLINE UTILITY CLASS
