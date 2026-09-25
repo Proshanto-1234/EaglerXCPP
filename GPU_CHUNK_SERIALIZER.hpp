@@ -36,18 +36,23 @@ private:
             uint gid = DTid.x;
             if (gid >= 4096) return;
 
-            uint blockId = (inputBlocks.Load(gid) & 0xFFu) << 4u;
+            // Load block ID (8-bit) and convert to 13-bit paletted block value (val << 4)
+            uint rawByte = inputBlocks.Load(gid & ~3u);
+            uint shiftByte = (gid % 4u) * 8u;
+            uint blockVal = ((rawByte >> shiftByte) & 0xFFu) << 4u;
 
             uint bitPos = gid * 13u;
             uint dwordIndex = bitPos / 32u;
             uint bitOffset = bitPos % 32u;
 
-            uint shiftedVal = blockId << bitOffset;
-            outputPacked.InterlockedOr(dwordIndex * 4u, shiftedVal);
+            // First DWORD mask & atomic OR
+            uint lowValue = (blockVal << bitOffset);
+            outputPacked.InterlockedOr(dwordIndex * 4u, lowValue);
 
+            // Crosses 32-bit DWORD boundary
             if (bitOffset > 19u) {
-                uint overflowVal = blockId >> (32u - bitOffset);
-                outputPacked.InterlockedOr((dwordIndex + 1u) * 4u, overflowVal);
+                uint highValue = blockVal >> (32u - bitOffset);
+                outputPacked.InterlockedOr((dwordIndex + 1u) * 4u, highValue);
             }
         }
     )";
@@ -150,11 +155,9 @@ public:
         m_deviceContext->CopyResource(m_stagingBuffer.Get(), m_outputBuffer.Get());
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        // Spin briefly or fall back if GPU is busy to avoid blocking the CPU network thread
         HRESULT hr = m_deviceContext->Map(m_stagingBuffer.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
-        
+
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-            // GPU hasn't finished yet; fall back immediately to CPU path to keep latency low
             ID3D11UnorderedAccessView* nullUAVs[] = { nullptr, nullptr };
             m_deviceContext->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
             return false;
