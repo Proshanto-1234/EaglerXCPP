@@ -1,3 +1,4 @@
+// THE EAGLERXCPP OPEN SOURCE PROJECT (c) 2026
 /*
 * Necessary macros and compiler checks here
 */
