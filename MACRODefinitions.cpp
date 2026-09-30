@@ -1,3 +1,4 @@
+// THE EAGLERXCPP OPEN SOURCE PROJECT
 #include "DEFINITIONS.hpp"
 
 #include <winsock2.h>
