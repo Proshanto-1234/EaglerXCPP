@@ -156,11 +156,11 @@ public:
         if (!m_isAvailable || !m_deviceContext || chunkInputs.empty()) return false;
         if (chunkInputs.size() != packedOutputs.size()) return false;
 
-        for (size_t i = 0; i < chunkInputs.size(); ++i) {
-            if (!chunkInputs[i] || !packedOutputs[i]) return false;
-        }
+        ID3D11UnorderedAccessView* nullUAVs[] = { nullptr, nullptr };
+        m_deviceContext->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
 
         for (size_t i = 0; i < chunkInputs.size(); ++i) {
+            if (!chunkInputs[i] || !packedOutputs[i]) return false;
             if (!SerializeChunk(chunkInputs[i], packedOutputs[i])) {
                 return false;
             }
@@ -169,8 +169,9 @@ public:
         return true;
     }
 
+    // Default implementation: optimized single-call path, same ABI and behavior as before.
     bool SerializeChunk(const uint8_t* blockData, uint64_t* packedOutput) {
-        if (!m_isAvailable || !m_deviceContext) return false;
+        if (!m_isAvailable || !m_deviceContext || !blockData || !packedOutput) return false;
 
         m_deviceContext->UpdateSubresource(m_inputBuffer.Get(), 0, nullptr, blockData, 0, 0);
 
