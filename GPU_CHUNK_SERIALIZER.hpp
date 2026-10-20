@@ -19,7 +19,6 @@ limitations under the License. */
 #include <wrl/client.h>
 #include <cstdint>
 #include <stdexcept>
-#include <vector>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxguid.lib")
@@ -113,7 +112,6 @@ public:
 
         if (FAILED(hr)) return false;
 
-        // Buffers setup
         D3D11_BUFFER_DESC inputDesc = {};
         inputDesc.ByteWidth = 4096;
         inputDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -121,7 +119,7 @@ public:
         m_device->CreateBuffer(&inputDesc, nullptr, m_inputBuffer.GetAddressOf());
 
         D3D11_BUFFER_DESC outputDesc = {};
-        outputDesc.ByteWidth = 6656; // 832 * 8 bytes
+        outputDesc.ByteWidth = 6656;
         outputDesc.Usage = D3D11_USAGE_DEFAULT;
         outputDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
         m_device->CreateBuffer(&outputDesc, nullptr, m_outputBuffer.GetAddressOf());
@@ -132,7 +130,6 @@ public:
         stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         m_device->CreateBuffer(&stagingDesc, nullptr, m_stagingBuffer.GetAddressOf());
 
-        // UAV Setup
         D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
         uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
         uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
@@ -151,25 +148,6 @@ public:
 
     bool IsAvailable() const { return m_isAvailable; }
 
-    bool SerializeChunkBatch(const std::vector<const uint8_t*>& chunkInputs,
-        std::vector<uint64_t*>& packedOutputs) {
-        if (!m_isAvailable || !m_deviceContext || chunkInputs.empty()) return false;
-        if (chunkInputs.size() != packedOutputs.size()) return false;
-
-        ID3D11UnorderedAccessView* nullUAVs[] = { nullptr, nullptr };
-        m_deviceContext->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
-
-        for (size_t i = 0; i < chunkInputs.size(); ++i) {
-            if (!chunkInputs[i] || !packedOutputs[i]) return false;
-            if (!SerializeChunk(chunkInputs[i], packedOutputs[i])) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    // Default implementation: optimized single-call path, same ABI and behavior as before.
     bool SerializeChunk(const uint8_t* blockData, uint64_t* packedOutput) {
         if (!m_isAvailable || !m_deviceContext || !blockData || !packedOutput) return false;
 
@@ -182,9 +160,7 @@ public:
         ID3D11UnorderedAccessView* uavs[] = { m_inputUAV.Get(), m_outputUAV.Get() };
         m_deviceContext->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
 
-        // Dispatch 16 thread groups (16 * 256 = 4096 threads)
         m_deviceContext->Dispatch(16, 1, 1);
-
         m_deviceContext->CopyResource(m_stagingBuffer.Get(), m_outputBuffer.Get());
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
