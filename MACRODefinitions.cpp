@@ -117,14 +117,18 @@ static void BroadcastChatMessage(const std::string& sender, const std::string& m
     size_t mcLengthVarIntLen = WriteVarIntToBuffer(mcTotalLengthVarInt, mcInnerPayloadSize);
 
     size_t totalMcPacketSize = mcLengthVarIntLen + static_cast<size_t>(mcInnerPayloadSize);
-    size_t mcHeaderStartOffset = 32 - (mcLengthVarIntLen + 1 + stringVarIntLen);
+    size_t headerLen = mcLengthVarIntLen + 1 + stringVarIntLen;
+    if (headerLen > 32 || totalMcPacketSize > sizeof(staticBuffer) - 32) {
+        return;
+    }
+    size_t mcHeaderStartOffset = 32 - headerLen;
     char* mcWriteCursor = staticBuffer + mcHeaderStartOffset;
 
     std::copy_n(mcTotalLengthVarInt, mcLengthVarIntLen, mcWriteCursor);
     mcWriteCursor += mcLengthVarIntLen;
     *mcWriteCursor = mcPacketId;
     mcWriteCursor += 1;
-    std::copy_n(stringVarInt, stringVarIntLen, mcWriteCursor);
+    std::copy_n(stringVarInt, stringVarIntLen, mcWriteCursor););
 
     char* frameStart = staticBuffer + mcHeaderStartOffset;
 
