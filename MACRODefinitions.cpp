@@ -424,7 +424,7 @@ static void ProcessEaglercraftPacket(CONNECTION_CONTEXT* ctx, uint8_t* payload, 
             int strLen = ReadVarInt(payload + cursor, len - cursor, strLenRead);
             cursor += strLenRead;
 
-            if (strLen > 0 && strLen <= 16 && cursor + strLen <= len) {
+            if (strLen > 0 && strLen < 16 && cursor + strLen <= len) {
                 std::memcpy(session.username, payload + cursor, strLen);
                 session.username[strLen] = '\0';
             }
