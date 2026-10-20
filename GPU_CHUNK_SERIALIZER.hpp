@@ -19,6 +19,7 @@ limitations under the License. */
 #include <wrl/client.h>
 #include <cstdint>
 #include <stdexcept>
+#include <vector>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxguid.lib")
@@ -149,6 +150,24 @@ public:
     }
 
     bool IsAvailable() const { return m_isAvailable; }
+
+    bool SerializeChunkBatch(const std::vector<const uint8_t*>& chunkInputs,
+        std::vector<uint64_t*>& packedOutputs) {
+        if (!m_isAvailable || !m_deviceContext || chunkInputs.empty()) return false;
+        if (chunkInputs.size() != packedOutputs.size()) return false;
+
+        for (size_t i = 0; i < chunkInputs.size(); ++i) {
+            if (!chunkInputs[i] || !packedOutputs[i]) return false;
+        }
+
+        for (size_t i = 0; i < chunkInputs.size(); ++i) {
+            if (!SerializeChunk(chunkInputs[i], packedOutputs[i])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     bool SerializeChunk(const uint8_t* blockData, uint64_t* packedOutput) {
         if (!m_isAvailable || !m_deviceContext) return false;
