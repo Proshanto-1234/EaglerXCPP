@@ -93,8 +93,19 @@ static void SendWebSocketFrame(unsigned long long socket, const char* payload, s
     }
 
     SOCKET s = static_cast<SOCKET>(socket);
-    (void)send(s, headerBuffer, static_cast<int>(headerLen), 0);
-    (void)send(s, payload, static_cast<int>(length), 0);
+    size_t offset = 0;
+    while (offset < headerLen) {
+        int sent = send(s, headerBuffer + offset, static_cast<int>(headerLen - offset), 0);
+        if (sent <= 0) return;
+        offset += static_cast<size_t>(sent);
+    }
+
+    offset = 0;
+    while (offset < length) {
+        int sent = send(s, payload + offset, static_cast<int>(length - offset), 0);
+        if (sent <= 0) return;
+        offset += static_cast<size_t>(sent);
+    }
 }
 
 static void BroadcastChatMessage(const std::string& sender, const std::string& message) {
