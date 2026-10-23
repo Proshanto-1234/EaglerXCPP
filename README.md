@@ -23,6 +23,6 @@ There is already a VCXPROJ file in this repository which one can download alongs
 * **Press `F5` and wait**
 * **Locate the project executable in the 'bin' directory**
 ## License
-This project is licensed under the Apache license 2.0 version. See [LICENSE](https://github.com/Proshanto-1234/EaglerXCPP/main/LICENSE) for more information about the topic.
+This project is licensed under the Apache license 2.0 version. See [LICENSE](https://github.com/Proshanto-1234/EaglerXCPP/blob/main/LICENSE) for more information about the topic or [raw LICENSE text](https://raw.githubusercontent.com/Proshanto-1234/EaglerXCPP/refs/heads/main/LICENSE) for the raw license file contents.
 ## Note ##
 The addition library dependencies have already been configured by in-source `#pragma` directives native to Microsoft Visual C/C++ (MSVC) compiler. Therefore, there is no need to set them again in the project configuration. The repository is also **Incomplete**. The program has a preference for Intel processors and is not guaranteed to run on AMD. If it does, it is good but if it does not, the official repository owner does not provide an alternative.
