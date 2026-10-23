@@ -1,5 +1,5 @@
 # Eaglercraft 1.12.2 Update 3 server based on C++
-A low-latency Minecraft 1.12.2 (Protocol Eaglercraft, WebSocket Connection) server backend written in native C++ for x64-86 bit Windows systems. This server uses unusual surprisingly fast optimizations to reduce latency and uses smarter preferences than usual Java server programs. Unfortunately most of this program is written by AI, at least for the repository owner's part, but that does not matter. Additionally this program has zero third-party library dependencies.
+A low-latency Eaglercraft 1.12.3 server backend written in native C++ for x86-64 Windows systems with Eaglercraft 1.12 client versions. This server uses unusual surprisingly fast optimizations to reduce latency and uses smarter preferences than usual Java server programs. Unfortunately most of this program is written by AI, at least for the repository owner's part, but that does not matter. Additionally this program has zero third-party library dependencies. The server is NOT backwards compatible meaning clients with Eaglercraft 1.8 or 1.5.2 versions will NOT work on the server
 
 ## Key Architectural Preferences
 * **Registered Input/Output and Network Acceleration**: Direct zero-copy network buffers using Windows RIO and IOCP rings for sub-millisecond packet processing.
@@ -22,5 +22,7 @@ There is already a VCXPROJ file in this repository which one can download alongs
 * **Ensure the project files are in the same directory and Enhanced Instruction Set is configured to AVX2**
 * **Press `F5` and wait**
 * **Locate the project executable in the 'bin' directory**
+## License
+This project is licensed under the Apache license 2.0 version. See [LICENSE](https://github.com/Proshanto-1234/EaglerXCPP/main/LICENSE) for more information about the topic.
 ## Note ##
-The addition library dependencies have already been configured by in-source `#pragma` directives native to Microsoft Visual C/C++ (MSVC) compiler. Therefore, there is no need to set them again in the project configuration. The repository is also *Incomplete*
+The addition library dependencies have already been configured by in-source `#pragma` directives native to Microsoft Visual C/C++ (MSVC) compiler. Therefore, there is no need to set them again in the project configuration. The repository is also **Incomplete**. The program has a preference for Intel processors and is not guaranteed to run on AMD. If it does, it is good but if it does not, the official repository owner does not provide an alternative.
